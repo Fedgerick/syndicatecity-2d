@@ -29,6 +29,7 @@ func _ready() -> void:
 	buildings_root = Node3D.new()
 	add_child(buildings_root)
 	_build_ground()
+	_build_hills()
 	_build_water()
 	_build_traffic()
 	_build_cars()
@@ -539,3 +540,29 @@ func _update_cars(delta: float) -> void:
 			# rotate so car's long axis aligns with motion
 			if car.get_meta("is_vert"):
 				car.rotate_object_local(Vector3(0, 1, 0), PI / 2)
+
+func _build_hills() -> void:
+	# A small hill cluster in the upper-left corner
+	var hill_positions := [
+		Vector3(-22, 0, -22),
+		Vector3(-18, 0, -25),
+		Vector3(-15, 0, -22),
+		Vector3(-22, 0, -18),
+		Vector3(-19, 0, -19),
+	]
+	for p in hill_positions:
+		var cone := MeshInstance3D.new()
+		var mesh := CylinderMesh.new()
+		mesh.top_radius = 0.0
+		mesh.bottom_radius = 3.5
+		mesh.height = 4.0
+		cone.mesh = mesh
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.55, 0.50, 0.35)
+		cone.material_override = mat
+		cone.position = p + Vector3(0, 2.0, 0)
+		add_child(cone)
+	# Add some trees on the hill sides
+	for p in hill_positions:
+		add_child(_make_box(Vector3(0.3, 0.8, 0.3), p + Vector3(2, 0.4, 2), Color(0.40, 0.25, 0.15)))
+		add_child(_make_box(Vector3(1.0, 1.2, 1.0), p + Vector3(2, 1.4, 2), Color(0.18, 0.40, 0.18)))
