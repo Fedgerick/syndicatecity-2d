@@ -45,6 +45,11 @@ func _ready() -> void:
 			_t = float(a.substr(7))
 	_apply_time()
 
+	for a in args:
+		if a == "--topdown":
+			cam_topdown = true
+			_refresh_camera()
+
 	if "--capture" in args:
 		await RenderingServer.frame_post_draw
 		await RenderingServer.frame_post_draw
@@ -54,12 +59,33 @@ func _ready() -> void:
 		get_tree().quit(0)
 
 
+var growth_accum := 0.0
+
 func _process(delta: float) -> void:
 	# Slowly advance time so user sees day/night if windowed
 	_t = fmod(_t + delta * 0.02, 1.0)
 	_apply_time()
-	_refresh_hud()
 	_update_traffic(delta)
+	# Growth: every 0.5s, randomly bump a built cell to a higher density
+	growth_accum += delta
+	if growth_accum > 0.5:
+		growth_accum -= 0.5
+		_grow_random_cell()
+	_refresh_hud()
+
+
+func _grow_random_cell() -> void:
+	if placed_buildings.is_empty():
+		return
+	var idx: int = randi() % placed_buildings.size()
+	var cell: Vector3i = placed_buildings[idx]
+	var key := "%d,%d" % [cell.x, cell.y]
+	var d: int = cell_density.get(key, 1)
+	if d >= DENSITY_MAX:
+		return
+	d += 1
+	cell_density[key] = d
+	_refresh_building_at(cell.x, cell.y)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -72,7 +98,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if hover_cell.x >= 0 and hover_cell.y >= 0:
 				if not _is_road(hover_cell.x, hover_cell.y) and _in_bounds(hover_cell.x, hover_cell.y):
 					if not _is_water(hover_cell.x, hover_cell.y):
-						_place_building(hover_cell.x, hover_cell.y, randi() % 3)
+						_place_building(hover_cell.x, hover_cell.y, randi() % 3, DENSITY_LOW)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
 			cam_dist = maxf(cam_dist - 5, 20.0)
 			_refresh_camera()
@@ -84,6 +110,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_T:
 				cam_topdown = not cam_topdown
 				_refresh_camera()
+			KEY_F5:
+				save_city()
+			KEY_F9:
+				load_city()
 
 
 func _raycast_ground(screen_pos: Vector2) -> Vector3:
@@ -191,16 +221,44 @@ func _zone_color(idx: int) -> Color:
 			Color(0.70, 0.55, 0.40)][idx % 3]
 
 
+# Density stages: 0 = empty lot, 1 = low (1 story), 2 = medium (2 story),
+# 3 = high (3-4 story tower), 4 = landmark (5+ story)
+const DENSITY_LOW := 1
+const DENSITY_MED := 2
+const DENSITY_HIGH := 3
+const DENSITY_MAX := 4
 var building_meshes: Array[MeshInstance3D] = []
+var cell_density: Dictionary = {}  # key "x,y:z" -> density stage
+var cell_color: Dictionary = {}    # key -> color index
 
-func _place_building(x: int, z: int, color_idx: int, h: float = -1.0) -> void:
-	if h < 0:
-		h = randf_range(1.0, 4.0)
+
+func _density_height(d: int) -> float:
+	return [0.0, 1.4, 2.6, 4.2, 6.5][clamp(d, 0, 4)]
+
+
+func _place_building(x: int, z: int, color_idx: int, d: int = 1) -> void:
+	var key := "%d,%d" % [x, z]
+	cell_density[key] = d
+	cell_color[key] = color_idx
+	var h: float = _density_height(d)
 	var b := _make_box(Vector3(CELL * 0.8, h, CELL * 0.8),
 		Vector3(_wx(x * CELL), h * 0.5, _wz(z * CELL)), _zone_color(color_idx))
 	buildings_root.add_child(b)
 	placed_buildings.append(Vector3i(x, z, color_idx))
 	building_meshes.append(b)
+
+
+func _refresh_building_at(x: int, z: int) -> void:
+	var key := "%d,%d" % [x, z]
+	var mesh_idx: int = placed_buildings.find(Vector3i(x, z, cell_color.get(key, 0)))
+	if mesh_idx < 0:
+		return
+	var b := building_meshes[mesh_idx]
+	var d: int = cell_density.get(key, 0)
+	var h: float = _density_height(d)
+	b.scale = Vector3(1, maxf(h, 0.4), 1)
+	b.position = Vector3(_wx(x * CELL), h * 0.5, _wz(z * CELL))
+
 
 
 func _build_initial_buildings() -> void:
@@ -211,7 +269,7 @@ func _build_initial_buildings() -> void:
 			if _is_road(x, z) or _is_water(x, z):
 				continue
 			if rng.randf() < 0.55:
-				_place_building(x, z, rng.randi() % 3)
+				_place_building(x, z, rng.randi() % 3, rng.randi_range(1, 3))
 
 
 func _build_lamps() -> void:
@@ -369,3 +427,50 @@ func _update_traffic(delta: float) -> void:
 		var a: Vector3 = path[idx]
 		var b: Vector3 = path[min(idx + 1, path.size() - 1)]
 		dot.position = a.lerp(b, frac)
+
+
+
+func save_city() -> void:
+	var data := {
+		"version": 1,
+		"t": _t,
+		"buildings": [],
+	}
+	for i in placed_buildings.size():
+		var c: Vector3i = placed_buildings[i]
+		var key := "%d,%d" % [c.x, c.y]
+		data.buildings.append({
+			"x": c.x,
+			"z": c.y,
+			"color": cell_color.get(key, 0),
+			"density": cell_density.get(key, 1),
+		})
+	var path := "user://city_save.json"
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	f.store_string(JSON.stringify(data))
+	f.close()
+	print("SAVE: %d buildings -> %s" % [data.buildings.size(), path])
+
+
+func load_city() -> void:
+	var path := "user://city_save.json"
+	if not FileAccess.file_exists(path):
+		return
+	var f := FileAccess.open(path, FileAccess.READ)
+	var text := f.get_as_text()
+	f.close()
+	var data: Variant = JSON.parse_string(text)
+	if data == null or not data is Dictionary:
+		return
+	# Wipe current city
+	for b in building_meshes:
+		b.queue_free()
+	building_meshes.clear()
+	placed_buildings.clear()
+	cell_density.clear()
+	cell_color.clear()
+	# Load new city
+	for entry in data.buildings:
+		_place_building(int(entry.x), int(entry.z), int(entry.color), int(entry.density))
+	_t = float(data.get("t", 0.5))
+	print("LOAD: %d buildings" % placed_buildings.size())
