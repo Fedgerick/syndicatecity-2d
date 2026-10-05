@@ -30,6 +30,7 @@ func _ready() -> void:
 	add_child(buildings_root)
 	_build_ground()
 	_build_water()
+	_build_traffic()
 	_build_trees()
 	_build_roads()
 	_build_initial_buildings()
@@ -58,6 +59,7 @@ func _process(delta: float) -> void:
 	_t = fmod(_t + delta * 0.02, 1.0)
 	_apply_time()
 	_refresh_hud()
+	_update_traffic(delta)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -314,3 +316,56 @@ func _build_hud() -> void:
 func _refresh_hud() -> void:
 	if hud_label:
 		hud_label.text = "SYNDICATE CITY   Feb 1926   $20,000   Pop 1,250   placed=%d" % placed_buildings.size()
+var traffic_dots: Array[MeshInstance3D] = []
+var traffic_paths: Array = []  # each = Array of Vector3 world positions
+
+
+func _build_traffic() -> void:
+	# Build horizontal road paths (every 4th row)
+	for z in range(0, GRID, ROAD_EVERY):
+		if z > GRID - 6:
+			continue
+		var path: Array[Vector3] = []
+		for x in range(0, GRID):
+			path.append(Vector3(_wx(x * CELL), 0.5, _wz(z * CELL)))
+		traffic_paths.append(path)
+	# Build vertical road paths
+	for x in range(0, GRID, ROAD_EVERY):
+		var path: Array[Vector3] = []
+		for z in range(0, GRID):
+			path.append(Vector3(_wx(x * CELL), 0.5, _wz(z * CELL)))
+		traffic_paths.append(path)
+	# Spawn dots
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 99
+	for i in 30:
+		var path: Array = traffic_paths[rng.randi() % traffic_paths.size()]
+		var dot := MeshInstance3D.new()
+		var mesh := SphereMesh.new()
+		mesh.radius = 0.3
+		mesh.height = 0.6
+		dot.mesh = mesh
+		var mat := StandardMaterial3D.new()
+		var is_vert: bool = path[0].x == path[-1].x
+		mat.albedo_color = Color(0.9, 0.9, 0.6) if is_vert else Color(0.9, 0.7, 0.3)
+		mat.emission = mat.albedo_color
+		mat.emission_enabled = true
+		mat.emission_energy_multiplier = 1.5
+		dot.material_override = mat
+		add_child(dot)
+		dot.set_meta("path", path)
+		dot.set_meta("t", rng.randf())
+		traffic_dots.append(dot)
+
+
+func _update_traffic(delta: float) -> void:
+	for dot in traffic_dots:
+		var path: Array = dot.get_meta("path")
+		var t: float = dot.get_meta("t")
+		t = fmod(t + delta * 0.15, 1.0)
+		dot.set_meta("t", t)
+		var idx := int(t * (path.size() - 1))
+		var frac := t * (path.size() - 1) - idx
+		var a: Vector3 = path[idx]
+		var b: Vector3 = path[min(idx + 1, path.size() - 1)]
+		dot.position = a.lerp(b, frac)
