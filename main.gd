@@ -31,6 +31,7 @@ func _ready() -> void:
 	_build_ground()
 	_build_water()
 	_build_traffic()
+	_build_cars()
 	_build_trees()
 	_build_roads()
 	_build_initial_buildings()
@@ -66,6 +67,7 @@ func _process(delta: float) -> void:
 	_t = fmod(_t + delta * 0.02, 1.0)
 	_apply_time()
 	_update_traffic(delta)
+	_update_cars(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
 	growth_accum += delta
 	if growth_accum > 0.5:
@@ -355,6 +357,7 @@ func _refresh_camera() -> void:
 
 
 var hud_label: Label
+var hud_time_slider: HSlider
 
 func _build_hud() -> void:
 	var cl := CanvasLayer.new()
@@ -368,6 +371,15 @@ func _build_hud() -> void:
 	hud_label.add_theme_font_size_override("font_size", 16)
 	hud_label.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
 	cl.add_child(hud_label)
+	hud_time_slider = HSlider.new()
+	hud_time_slider.min_value = 0
+	hud_time_slider.max_value = 1
+	hud_time_slider.step = 0.01
+	hud_time_slider.value = _t
+	hud_time_slider.position = Vector2(680, 8)
+	hud_time_slider.size = Vector2(100, 24)
+	hud_time_slider.value_changed.connect(func(v): _t = v; _apply_time())
+	cl.add_child(hud_time_slider)
 	_refresh_hud()
 
 
@@ -474,3 +486,56 @@ func load_city() -> void:
 		_place_building(int(entry.x), int(entry.z), int(entry.color), int(entry.density))
 	_t = float(data.get("t", 0.5))
 	print("LOAD: %d buildings" % placed_buildings.size())
+var cars: Array[MeshInstance3D] = []
+
+
+func _build_cars() -> void:
+	# Place 12 cars on random road paths
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77
+	for i in 12:
+		var path: Array = traffic_paths[rng.randi() % traffic_paths.size()]
+		var car := MeshInstance3D.new()
+		var mesh := BoxMesh.new()
+		var is_vert: bool = path[0].x == path[-1].x
+		mesh.size = Vector3(0.9 if is_vert else 1.6, 0.5, 1.6 if is_vert else 0.9)
+		car.mesh = mesh
+		var mat := StandardMaterial3D.new()
+		var car_colors := [
+			Color(0.85, 0.20, 0.15),
+			Color(0.20, 0.40, 0.85),
+			Color(0.85, 0.78, 0.20),
+			Color(0.20, 0.65, 0.30),
+			Color(0.55, 0.20, 0.65),
+		]
+		mat.albedo_color = car_colors[i % car_colors.size()]
+		# headlights as small emissive
+		mat.emission_enabled = false
+		car.material_override = mat
+		add_child(car)
+		car.set_meta("path", path)
+		car.set_meta("t", rng.randf())
+		car.set_meta("is_vert", is_vert)
+		cars.append(car)
+
+
+func _update_cars(delta: float) -> void:
+	for car in cars:
+		var path: Array = car.get_meta("path")
+		var t: float = car.get_meta("t")
+		t = fmod(t + delta * 0.07, 1.0)
+		car.set_meta("t", t)
+		var idx := int(t * (path.size() - 1))
+		var frac := t * (path.size() - 1) - idx
+		var a: Vector3 = path[idx]
+		var b: Vector3 = path[min(idx + 1, path.size() - 1)]
+		var p2 = a.lerp(b, frac)
+		p2.y = 0.3
+		car.position = p2
+		# Face direction of motion
+		var dir: Vector3 = (b - a).normalized()
+		if dir.length() > 0.01:
+			car.look_at(car.position + dir, Vector3.UP)
+			# rotate so car's long axis aligns with motion
+			if car.get_meta("is_vert"):
+				car.rotate_object_local(Vector3(0, 1, 0), PI / 2)
