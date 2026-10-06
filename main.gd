@@ -18,9 +18,9 @@ var _t := 0.5
 var lamps: Array[MeshInstance3D] = []
 var buildings_root: Node3D
 var placed_buildings: Array[Vector3i] = []  # (x, z, color_index)
-var cam_pitch := -65.0
+var cam_pitch := -50.0
 var cam_yaw := 35.0
-var cam_dist := 75.0
+var cam_dist := 90.0
 var cam_topdown := false
 var hover_cell := Vector2i(-1, -1)
 
@@ -163,7 +163,7 @@ func _build_ground() -> void:
 	pmesh.size = Vector2(GRID * CELL, GRID * CELL)
 	plane.mesh = pmesh
 	var pmat := StandardMaterial3D.new()
-	pmat.albedo_color = Color(0.55, 0.65, 0.40)
+	pmat.albedo_color = Color(0.50, 0.62, 0.32)
 	plane.material_override = pmat
 	# giant collision box so raycasts hit
 	plane.add_child(_make_box(
@@ -187,16 +187,24 @@ func _build_water() -> void:
 		Vector3(GRID * CELL + 20, 0.04, 1.2),
 		Vector3(0, river_y - 0.01, HALF + 1.0),
 		Color(0.85, 0.80, 0.65)))
-	# Pond: 14x14 lake in upper-right corner (avoids hills)
+	# Pond: 12x12 blue tile in the lower-LEFT (away from hills)
 	add_child(_make_box(
-		Vector3(14.0, 0.04, 14.0),
-		Vector3(_wx(GRID * CELL + 3 * CELL), river_y, _wz(-3 * CELL)),
+		Vector3(12.0, 0.04, 12.0),
+		Vector3(_wx(-3 * CELL), river_y, _wz(GRID * CELL + 3 * CELL)),
 		Color(0.30, 0.50, 0.78)))
-	# Beach around pond (south edge - lighter sand)
+	# Beach on the east side of pond
 	add_child(_make_box(
-		Vector3(15.0, 0.04, 1.5),
-		Vector3(_wx(GRID * CELL + 3 * CELL), river_y - 0.01, _wz(-3 * CELL) + 7),
+		Vector3(1.5, 0.04, 13.0),
+		Vector3(_wx(-3 * CELL) + 6, river_y - 0.01, _wz(GRID * CELL + 3 * CELL)),
 		Color(0.85, 0.80, 0.65)))
+	# Tree-line along river bank (north shore, between city and water)
+	for x in range(-int(GRID / 2 + 4), int(GRID / 2 + 4), 2):
+		add_child(_make_box(Vector3(0.4, 1.0, 0.4),
+			Vector3(_wx(x * CELL), 0.5, HALF + 0.5),
+			Color(0.45, 0.30, 0.20)))
+		add_child(_make_box(Vector3(1.2, 1.5, 1.2),
+			Vector3(_wx(x * CELL), 1.75, HALF + 0.5),
+			Color(0.20, 0.45, 0.20)))
 
 
 func _build_trees() -> void:
@@ -329,7 +337,7 @@ func _apply_time() -> void:
 	var is_day := sun_height > 0.0
 	sun.light_energy = max(sun_height * 1.2, 0.0)
 	sun.light_color = Color(1.0, lerpf(0.6, 0.95, is_day as float), lerpf(0.4, 0.85, is_day as float))
-	env.ambient_light_energy = lerpf(0.35, 0.8, is_day as float)
+	env.ambient_light_energy = lerpf(0.55, 0.9, is_day as float)
 	env.ambient_light_color = Color(0.85, 0.85, 0.95)
 	if is_day:
 		env.background_mode = Environment.BG_SKY
