@@ -174,12 +174,29 @@ func _build_ground() -> void:
 
 
 func _build_water() -> void:
-	add_child(_make_box(Vector3(GRID * CELL, 0.05, 8),
-		Vector3(0, 0.0, HALF - 4),
+	# River along the BOTTOM edge (z > HALF means outside city south)
+	# Width: 8m strip, length: extends 8m past the grid on both sides
+	var river_y := 0.02
+	# River: a thinner strip running along the south edge
+	add_child(_make_box(
+		Vector3(GRID * CELL + 20, 0.05, 6),
+		Vector3(0, river_y, HALF + 4),
 		Color(0.30, 0.50, 0.78)))
-	add_child(_make_box(Vector3(8, 0.05, 8),
-		Vector3(HALF - 8, 0.0, HALF - 8),
+	# Beach shore just inside the river (north of it)
+	add_child(_make_box(
+		Vector3(GRID * CELL + 20, 0.04, 1.2),
+		Vector3(0, river_y - 0.01, HALF + 1.0),
+		Color(0.85, 0.80, 0.65)))
+	# Pond: 14x14 lake in upper-right corner (avoids hills)
+	add_child(_make_box(
+		Vector3(14.0, 0.04, 14.0),
+		Vector3(_wx(GRID * CELL + 3 * CELL), river_y, _wz(-3 * CELL)),
 		Color(0.30, 0.50, 0.78)))
+	# Beach around pond (south edge - lighter sand)
+	add_child(_make_box(
+		Vector3(15.0, 0.04, 1.5),
+		Vector3(_wx(GRID * CELL + 3 * CELL), river_y - 0.01, _wz(-3 * CELL) + 7),
+		Color(0.85, 0.80, 0.65)))
 
 
 func _build_trees() -> void:
@@ -201,7 +218,8 @@ func _is_road(x: int, z: int) -> bool:
 
 
 func _is_water(_x: int, z: int) -> bool:
-	return z > GRID - 6
+	# z > GRID - 4 means within the river (south edge of grid)
+	return z > GRID - 4
 
 
 func _in_bounds(x: int, z: int) -> bool:
@@ -313,11 +331,13 @@ func _apply_time() -> void:
 	sun.light_color = Color(1.0, lerpf(0.6, 0.95, is_day as float), lerpf(0.4, 0.85, is_day as float))
 	env.ambient_light_energy = lerpf(0.35, 0.8, is_day as float)
 	env.ambient_light_color = Color(0.85, 0.85, 0.95)
-	if not is_day:
+	if is_day:
+		env.background_mode = Environment.BG_SKY
+		env.ambient_light_sky_contribution = 1.0
+	else:
 		env.background_mode = Environment.BG_COLOR
 		env.background_color = Color(0.05, 0.07, 0.15)
-	else:
-		env.background_mode = Environment.BG_SKY
+		env.ambient_light_sky_contribution = 0.3
 	var lamp_e := lerpf(1.5, 0.0, is_day as float)
 	for lm in lamps:
 		var mat: StandardMaterial3D = lm.material_override
@@ -364,21 +384,27 @@ func _build_hud() -> void:
 	var cl := CanvasLayer.new()
 	add_child(cl)
 	var bg := ColorRect.new()
-	bg.color = Color(0, 0, 0, 0.7)
-	bg.size = Vector2(800, 40)
+	bg.color = Color(0, 0, 0, 0.75)
+	bg.size = Vector2(1280, 36)
 	cl.add_child(bg)
 	hud_label = Label.new()
-	hud_label.position = Vector2(12, 10)
-	hud_label.add_theme_font_size_override("font_size", 16)
+	hud_label.position = Vector2(12, 8)
+	hud_label.add_theme_font_size_override("font_size", 18)
 	hud_label.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
 	cl.add_child(hud_label)
+	var lbl2 := Label.new()
+	lbl2.text = "  Time of Day:"
+	lbl2.position = Vector2(1020, 8)
+	lbl2.add_theme_font_size_override("font_size", 14)
+	lbl2.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
+	cl.add_child(lbl2)
 	hud_time_slider = HSlider.new()
 	hud_time_slider.min_value = 0
 	hud_time_slider.max_value = 1
 	hud_time_slider.step = 0.01
 	hud_time_slider.value = _t
-	hud_time_slider.position = Vector2(680, 8)
-	hud_time_slider.size = Vector2(100, 24)
+	hud_time_slider.position = Vector2(1120, 6)
+	hud_time_slider.size = Vector2(150, 24)
 	hud_time_slider.value_changed.connect(func(v): _t = v; _apply_time())
 	cl.add_child(hud_time_slider)
 	_refresh_hud()
@@ -541,28 +567,46 @@ func _update_cars(delta: float) -> void:
 			if car.get_meta("is_vert"):
 				car.rotate_object_local(Vector3(0, 1, 0), PI / 2)
 
+
+
 func _build_hills() -> void:
-	# A small hill cluster in the upper-left corner
-	var hill_positions := [
-		Vector3(-22, 0, -22),
-		Vector3(-18, 0, -25),
-		Vector3(-15, 0, -22),
-		Vector3(-22, 0, -18),
-		Vector3(-19, 0, -19),
+	# Hills: pyramidal peaks OUTSIDE the city grid
+	var peaks := [
+		Vector3(_wx(-3 * CELL), 0, _wz(-3 * CELL)),
+		Vector3(_wx(-2 * CELL), 0, _wz(-4 * CELL)),
+		Vector3(_wx(GRID * CELL + 3 * CELL), 0, _wz(-2 * CELL)),
+		Vector3(_wx(GRID * CELL + 2 * CELL), 0, _wz(-4 * CELL)),
 	]
-	for p in hill_positions:
+	for i in peaks.size():
+		var p: Vector3 = peaks[i]
 		var cone := MeshInstance3D.new()
 		var mesh := CylinderMesh.new()
+		# vary height for visual variety
+		var h: float = [5.5, 4.0, 4.5, 3.5][i]
 		mesh.top_radius = 0.0
-		mesh.bottom_radius = 3.5
-		mesh.height = 4.0
+		mesh.bottom_radius = 3.0 + (h - 3.5) * 0.3
+		mesh.height = h
 		cone.mesh = mesh
 		var mat := StandardMaterial3D.new()
-		mat.albedo_color = Color(0.55, 0.50, 0.35)
+		# darker at the base, lighter green-grey on top via material override
+		mat.albedo_color = Color(0.50, 0.55, 0.40)
 		cone.material_override = mat
-		cone.position = p + Vector3(0, 2.0, 0)
+		cone.position = p + Vector3(0, h * 0.5, 0)
 		add_child(cone)
-	# Add some trees on the hill sides
-	for p in hill_positions:
-		add_child(_make_box(Vector3(0.3, 0.8, 0.3), p + Vector3(2, 0.4, 2), Color(0.40, 0.25, 0.15)))
-		add_child(_make_box(Vector3(1.0, 1.2, 1.0), p + Vector3(2, 1.4, 2), Color(0.18, 0.40, 0.18)))
+		# snow cap on taller peaks
+		if h >= 5.0:
+			var cap := MeshInstance3D.new()
+			var cap_mesh := CylinderMesh.new()
+			cap_mesh.top_radius = 0.0
+			cap_mesh.bottom_radius = 0.8
+			cap_mesh.height = 1.0
+			cap.mesh = cap_mesh
+			var cap_mat := StandardMaterial3D.new()
+			cap_mat.albedo_color = Color(0.92, 0.92, 0.95)
+			cap.material_override = cap_mat
+			cap.position = p + Vector3(0, h + 0.5, 0)
+			add_child(cap)
+		# A few trees on the hillside
+		for tx in [-1, 1]:
+			add_child(_make_box(Vector3(0.3, 0.8, 0.3), p + Vector3(tx * 2.0, 0.4, 2.0), Color(0.40, 0.25, 0.15)))
+			add_child(_make_box(Vector3(1.0, 1.2, 1.0), p + Vector3(tx * 2.0, 1.4, 2.0), Color(0.18, 0.40, 0.18)))
