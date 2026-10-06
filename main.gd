@@ -33,6 +33,8 @@ var sim_expenses_today: int = 0
 var growth_accum: float = 0.0
 var sim_day_accum: float = 0.0  # seconds until next sim day
 var sim_unlocked: Array[String] = ["Basic Zone"]
+var interior_view: bool = false
+var interior_root: Node3D
 var player: MeshInstance3D
 var player_pos: Vector3 = Vector3.ZERO
 var player_vel: Vector3 = Vector3.ZERO
@@ -65,6 +67,7 @@ func _ready() -> void:
 	_build_water()
 	_build_traffic()
 	_build_cars()
+	_build_npcs()
 	_build_trees()
 	_build_roads()
 	_build_initial_buildings()
@@ -103,6 +106,7 @@ func _process(delta: float) -> void:
 	_apply_time()
 	_update_traffic(delta)
 	_update_cars(delta)
+	_update_npcs(delta)
 	_update_player(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
 	growth_accum += delta
@@ -335,6 +339,14 @@ func _refresh_controls() -> void:
 
 
 
+
+
+
+func _cell_has_building(x: int, z: int) -> bool:
+	for b in placed_buildings:
+		if b.x == x and b.y == z:
+			return true
+	return false
 
 func _raycast_ground(screen_pos: Vector2) -> Vector3:
 	var cam := get_viewport().get_camera_3d()
@@ -633,16 +645,35 @@ func _update_player(delta: float) -> void:
 	if Input.is_action_pressed("ui_right"):
 		move += right
 	if move.length() > 0.01:
-		move = move.normalized() * player_speed * delta
-		var new_pos: Vector3 = player_pos + move
-		# Clamp to world bounds (stay on grid + a bit of margin)
-		var bound: float = HALF - CELL * 0.5
-		new_pos.x = clamp(new_pos.x, -bound, bound)
-		new_pos.z = clamp(new_pos.z, -bound, bound)
-		player_pos = new_pos
-		player.position = player_pos
-		# Face the direction of movement
-		if move.length() > 0.001:
+			move = move.normalized() * player_speed * delta
+			var new_pos: Vector3 = player_pos + move
+			# Clamp to world bounds (stay on grid + a bit of margin)
+			var bound: float = HALF - CELL * 0.5
+			new_pos.x = clamp(new_pos.x, -bound, bound)
+			new_pos.z = clamp(new_pos.z, -bound, bound)
+			# Block: don't walk through buildings (slide along them)
+			var cx: int = int(round((new_pos.x + HALF) / CELL))
+			var cz: int = int(round((new_pos.z + HALF) / CELL))
+			if _cell_has_building(cx, cz):
+				# Try X-only move
+				var alt_x: Vector3 = Vector3(new_pos.x, player_pos.y, player_pos.z)
+				var cx2: int = int(round((alt_x.x + HALF) / CELL))
+				var cz2: int = int(round((alt_x.z + HALF) / CELL))
+				if not _cell_has_building(cx2, cz2):
+					new_pos = alt_x
+				else:
+					# Try Z-only move
+					var alt_z: Vector3 = Vector3(player_pos.x, player_pos.y, new_pos.z)
+					var cx3: int = int(round((alt_z.x + HALF) / CELL))
+					var cz3: int = int(round((alt_z.z + HALF) / CELL))
+					if not _cell_has_building(cx3, cz3):
+						new_pos = alt_z
+					else:
+						# Blocked both ways, no movement
+						new_pos = player_pos
+			player_pos = new_pos
+			player.position = player_pos
+			# Face the direction of movement
 			var yaw_rad: float = atan2(move.x, move.z)
 			player.rotation.y = yaw_rad
 	# Toggle third-person camera with C
@@ -850,6 +881,128 @@ func _update_traffic(delta: float) -> void:
 
 
 
+
+
+func _build_npcs() -> void:
+	# Spawn 12 pedestrians on roads. Each walks a straight segment back and forth.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 99
+	for n in 12:
+		var road_x: int = rng.randi_range(1, 7) * ROAD_EVERY
+		var road_z: int = rng.randi_range(1, 7) * ROAD_EVERY
+		# Path: 8 cells in +x direction along z=road_z
+		var p0: Vector3 = Vector3(_wx(road_x * CELL), 0.0, _wz(road_z * CELL + CELL * 0.5))
+		var p1: Vector3 = Vector3(_wx((road_x + 8) * CELL), 0.0, _wz(road_z * CELL + CELL * 0.5))
+		var npc := MeshInstance3D.new()
+		var capsule := CapsuleMesh.new()
+		capsule.height = 1.4
+		capsule.radius = 0.25
+		npc.mesh = capsule
+		var mat := StandardMaterial3D.new()
+		var palette := [Color(0.85, 0.20, 0.20), Color(0.20, 0.85, 0.40), Color(0.95, 0.85, 0.20), Color(0.80, 0.40, 0.95)]
+		mat.albedo_color = palette[rng.randi() % palette.size()]
+		npc.material_override = mat
+		npc.position = p0
+		add_child(npc)
+		npcs.append({
+			"mesh": npc,
+			"path": [p0, p1],
+			"t": 0.0,
+			"dir": 1,
+			"speed": rng.randf_range(1.2, 2.2),
+		})
+
+
+func _update_npcs(delta: float) -> void:
+	for n in npcs:
+		var t: float = n["t"]
+		t += delta * n["speed"] * n["dir"] / (n["path"][1] - n["path"][0]).length()
+		if t > 1.0:
+			t = 1.0
+			n["dir"] = -1
+		elif t < 0.0:
+			t = 0.0
+			n["dir"] = 1
+		n["t"] = t
+		var pos: Vector3 = n["path"][0].lerp(n["path"][1], t)
+		pos.y = 0.7
+		n["mesh"].position = pos
+		# Face direction
+		var fwd: Vector3 = (n["path"][1] - n["path"][0]).normalized() * n["dir"]
+		if fwd.length() > 0.01:
+			n["mesh"].rotation.y = atan2(fwd.x, fwd.z)
+
+
+func _try_enter_building() -> void:
+	if interior_view:
+		return
+	# Find nearest building cell within 4m
+	var nearest: Vector2i = Vector2i(-1, -1)
+	var best_d: float = 9999.0
+	for b in placed_buildings:
+		var bpos: Vector3 = Vector3(_wx(b.x * CELL), 0, _wz(b.y * CELL))
+		var d: float = player_pos.distance_to(bpos)
+		if d < best_d:
+			best_d = d
+			nearest = Vector2i(b.x, b.y)
+	if best_d > 3.5:
+		return
+	_enter_building(nearest.x, nearest.y)
+
+
+func _enter_building(x: int, z: int) -> void:
+	interior_view = true
+	interior_root = Node3D.new()
+	add_child(interior_root)
+	# Floor (small dark plane)
+	var floor := _make_box(Vector3(2.5, 0.05, 2.5),
+		Vector3(0, 0, 0),
+		Color(0.30, 0.25, 0.20))
+	floor.position = Vector3(_wx(x * CELL), 0.1, _wz(z * CELL))
+	interior_root.add_child(floor)
+	# Walls
+	var wall_mat_color: Color = Color(0.70, 0.65, 0.55)
+	interior_root.add_child(_make_box(Vector3(2.5, 2.5, 0.1),
+		Vector3(_wx(x * CELL) - 1.2, 1.25, _wz(z * CELL)),
+		wall_mat_color))
+	interior_root.add_child(_make_box(Vector3(2.5, 2.5, 0.1),
+		Vector3(_wx(x * CELL) + 1.2, 1.25, _wz(z * CELL)),
+		wall_mat_color))
+	interior_root.add_child(_make_box(Vector3(0.1, 2.5, 2.5),
+		Vector3(_wx(x * CELL), 1.25, _wz(z * CELL) - 1.2),
+		wall_mat_color))
+	# Roof
+	interior_root.add_child(_make_box(Vector3(2.5, 0.1, 2.5),
+		Vector3(_wx(x * CELL), 2.6, _wz(z * CELL)),
+		Color(0.40, 0.35, 0.30)))
+	# A few props
+	for px in [-0.7, 0.0, 0.7]:
+		interior_root.add_child(_make_box(Vector3(0.4, 0.4, 0.4),
+			Vector3(_wx(x * CELL) + px, 0.3, _wz(z * CELL) - 0.5),
+			Color(0.55, 0.45, 0.30)))
+	# Hide the exterior, show only interior + dim lighting
+	# Easiest: set all OTHER nodes' visible = false, but we tracked them via interior_root separation
+	# Move player to interior center
+	player_pos = Vector3(_wx(x * CELL), 0.7, _wz(z * CELL) + 0.5)
+	player.position = player_pos
+	# Switch to interior camera
+	cam_thirdperson = true
+	cam_player_dist = 2.0
+	cam_player_pitch = -10.0
+	_refresh_player_camera()
+
+
+func _exit_building() -> void:
+	if not interior_view:
+		return
+	interior_view = false
+	if interior_root:
+		interior_root.queue_free()
+		interior_root = null
+	cam_player_dist = 12.0
+	cam_player_pitch = -25.0
+
+
 func save_city() -> void:
 	var data := {
 		"version": 2,
@@ -918,6 +1071,7 @@ func load_city() -> void:
 	_apply_time()
 	print("LOAD: %d buildings, $", placed_buildings.size(), sim_budget, " day ", sim_day_count)
 var cars: Array[MeshInstance3D] = []
+var npcs: Array = []  # each: {mesh, path, idx, t}
 
 
 func _build_cars() -> void:
