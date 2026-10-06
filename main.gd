@@ -82,6 +82,7 @@ func _ready() -> void:
 	_build_water()
 	_build_traffic()
 	_build_cars()
+	_build_parked_cars()
 	_build_npcs()
 	_build_trees()
 	_build_roads()
@@ -1105,6 +1106,32 @@ func _exit_vehicle() -> void:
 	cam_player_pitch = -25.0
 
 
+
+
+func _check_vehicle_hits() -> void:
+	# Hit pedestrians
+	for n in npcs:
+		var d: float = n["mesh"].position.distance_to(current_vehicle_pos)
+		if d < 1.5:
+			# Knock them back
+			var away: Vector3 = (n["mesh"].position - current_vehicle_pos).normalized()
+			n["mesh"].position += away * 4.0
+			_add_wanted(1)
+			# Mark them as hit (visual: turn darker)
+			n["mesh"].material_override.albedo_color = Color(0.4, 0.05, 0.05)
+	# Hit other parked cars (vehicles list)
+	for v in vehicles:
+		if v["mesh"] == current_vehicle:
+			continue
+		var d2: float = v["pos"].distance_to(current_vehicle_pos)
+		if d2 < 2.5:
+			# Push the parked car
+			var push: Vector3 = (v["pos"] - current_vehicle_pos).normalized()
+			v["pos"] += push * 1.5
+			v["mesh"].position = v["pos"]
+			current_vehicle_speed *= 0.4  # bounce
+			_add_wanted(1)
+
 func _update_vehicle(delta: float) -> void:
 	if not vehicle_in or current_vehicle == null:
 		return
@@ -1140,6 +1167,9 @@ func _update_vehicle(delta: float) -> void:
 	# Move player too (so camera follows)
 	player_pos = new_pos
 	player.position = new_pos
+	# Hit detection
+	if abs(current_vehicle_speed) > 1.0:
+		_check_vehicle_hits()
 
 
 func _is_player_in_vehicle() -> bool:
@@ -1452,6 +1482,43 @@ func _build_burglar() -> void:
 	b.name = "Burglar"
 	add_child(b)
 
+
+
+
+func _build_parked_cars() -> void:
+	# 4 parked cars in obvious places for player to enter
+	var spots: Array = [
+		Vector3(_wx(2 * CELL), 0.4, _wz(2 * CELL)),
+		Vector3(_wx(28 * CELL), 0.4, _wz(2 * CELL)),
+		Vector3(_wx(2 * CELL), 0.4, _wz(28 * CELL)),
+		Vector3(_wx(28 * CELL), 0.4, _wz(28 * CELL)),
+	]
+	var colors: Array = [
+		Color(0.85, 0.20, 0.15),
+		Color(0.20, 0.40, 0.85),
+		Color(0.85, 0.78, 0.20),
+		Color(0.20, 0.65, 0.30),
+	]
+	for i in range(spots.size()):
+		var pos: Vector3 = spots[i]
+		var car := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(1.6, 0.7, 3.6)
+		car.mesh = bm
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = colors[i]
+		car.material_override = mat
+		car.position = pos
+		# Random initial yaw
+		var yaw: float = randf() * TAU
+		car.rotation.y = yaw
+		add_child(car)
+		vehicles.append({
+			"mesh": car,
+			"pos": pos,
+			"yaw": yaw,
+			"speed": 0.0,
+		})
 
 func save_city() -> void:
 	var data := {
