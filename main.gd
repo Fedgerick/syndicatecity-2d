@@ -33,6 +33,14 @@ var sim_expenses_today: int = 0
 var growth_accum: float = 0.0
 var sim_day_accum: float = 0.0  # seconds until next sim day
 var sim_unlocked: Array[String] = ["Basic Zone"]
+var player: MeshInstance3D
+var player_pos: Vector3 = Vector3.ZERO
+var player_vel: Vector3 = Vector3.ZERO
+var player_speed: float = 6.0
+var cam_thirdperson: bool = false
+var cam_player_yaw: float = 35.0
+var cam_player_pitch: float = -25.0
+var cam_player_dist: float = 12.0
 var demand_bars_root: Node
 var cam_pitch := -50.0
 var cam_yaw := 35.0
@@ -55,6 +63,7 @@ func _ready() -> void:
 	_build_lamps()
 	_build_light_env()
 	_build_camera()
+	_build_player()
 	_build_hud()
 	demand_bars_root = Node.new()
 	hud_label.add_child(demand_bars_root)
@@ -86,6 +95,7 @@ func _process(delta: float) -> void:
 	_apply_time()
 	_update_traffic(delta)
 	_update_cars(delta)
+	_update_player(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
 	growth_accum += delta
 	if growth_accum > 0.5:
@@ -434,6 +444,92 @@ func _build_camera() -> void:
 	_refresh_camera()
 	_camera.make_current()
 
+
+
+func _build_player() -> void:
+	player = MeshInstance3D.new()
+	var body_mesh := CapsuleMesh.new()
+	body_mesh.height = 1.6
+	body_mesh.radius = 0.35
+	player.mesh = body_mesh
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.20, 0.55, 0.95)  # blue shirt
+	mat.roughness = 0.6
+	player.material_override = mat
+	player.scale = Vector3(1.0, 1.0, 1.0)
+	# Start at a road cell (8, 4 = inside grid, on a road row)
+	var sx: int = 0  # road x index
+	var sz: int = 4  # road z row
+	player_pos = Vector3(_wx(sx * CELL + CELL * 0.5), 0.8, _wz(sz * CELL + CELL * 0.5))
+	player.position = player_pos
+	add_child(player)
+	# Head indicator (small sphere above)
+	var head := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.25
+	sm.height = 0.5
+	head.mesh = sm
+	var hmat := StandardMaterial3D.new()
+	hmat.albedo_color = Color(0.95, 0.78, 0.65)
+	head.material_override = hmat
+	head.position = Vector3(0.0, 1.05, 0.0)
+	player.add_child(head)
+
+
+func _update_player(delta: float) -> void:
+	if player == null:
+		return
+	# WASD/arrows: world-relative movement based on camera yaw
+	var fwd := Vector3(sin(deg_to_rad(cam_yaw)), 0.0, cos(deg_to_rad(cam_yaw)))
+	var right := Vector3(cos(deg_to_rad(cam_yaw)), 0.0, -sin(deg_to_rad(cam_yaw)))
+	var move := Vector3.ZERO
+	if Input.is_action_pressed("ui_up"):
+		move += fwd
+	if Input.is_action_pressed("ui_down"):
+		move -= fwd
+	if Input.is_action_pressed("ui_left"):
+		move -= right
+	if Input.is_action_pressed("ui_right"):
+		move += right
+	if move.length() > 0.01:
+		move = move.normalized() * player_speed * delta
+		var new_pos: Vector3 = player_pos + move
+		# Clamp to world bounds (stay on grid + a bit of margin)
+		var bound: float = HALF - CELL * 0.5
+		new_pos.x = clamp(new_pos.x, -bound, bound)
+		new_pos.z = clamp(new_pos.z, -bound, bound)
+		player_pos = new_pos
+		player.position = player_pos
+		# Face the direction of movement
+		if move.length() > 0.001:
+			var yaw_rad: float = atan2(move.x, move.z)
+			player.rotation.y = yaw_rad
+	# Toggle third-person camera with C
+	if Input.is_key_pressed(KEY_C) and not cam_thirdperson:
+		cam_thirdperson = true
+		_refresh_player_camera()
+	elif Input.is_key_pressed(KEY_V) and cam_thirdperson:
+		cam_thirdperson = false
+		_refresh_camera()
+	if cam_thirdperson:
+		_refresh_player_camera()
+
+
+func _refresh_player_camera() -> void:
+	var cam: Camera3D = $Camera3D
+	if cam == null:
+		return
+	var offset := Vector3(
+		sin(deg_to_rad(cam_player_yaw)) * cos(deg_to_rad(cam_player_pitch)),
+		sin(deg_to_rad(cam_player_pitch)),
+		cos(deg_to_rad(cam_player_yaw)) * cos(deg_to_rad(cam_player_pitch))
+	) * cam_player_dist
+	cam.position = player_pos + offset + Vector3(0.0, 1.5, 0.0)
+	cam.look_at(player_pos + Vector3(0.0, 1.0, 0.0), Vector3.UP)
+
+
+func _on_player_pos() -> void:
+	pass
 
 func _refresh_camera() -> void:
 	if _camera == null:
