@@ -33,6 +33,15 @@ var sim_expenses_today: int = 0
 var growth_accum: float = 0.0
 var sim_day_accum: float = 0.0  # seconds until next sim day
 var sim_unlocked: Array[String] = ["Basic Zone"]
+var wanted_level: int = 0  # 0..5 stars
+var wanted_timer: float = 0.0
+var police: Array = []  # list of {mesh, pos, target_pos, speed}
+var vehicle_in: bool = false  # true when player is driving a car
+var current_vehicle: MeshInstance3D
+var current_vehicle_pos: Vector3
+var current_vehicle_yaw: float = 0.0
+var current_vehicle_speed: float = 0.0
+var vehicles: Array = []  # list of {mesh, pos, yaw, speed, color}
 var interior_view: bool = false
 var interior_root: Node3D
 var player: MeshInstance3D
@@ -72,6 +81,7 @@ func _ready() -> void:
 	_build_roads()
 	_build_initial_buildings()
 	_build_lamps()
+	_build_police()
 	_build_light_env()
 	_build_camera()
 	_build_player()
@@ -106,8 +116,11 @@ func _process(delta: float) -> void:
 	_apply_time()
 	_update_traffic(delta)
 	_update_cars(delta)
+	_update_police(delta)
+	_update_wanted(delta)
 	_update_npcs(delta)
 	_update_player(delta)
+	_update_vehicle(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
 	growth_accum += delta
 	if growth_accum > 0.5:
@@ -119,6 +132,7 @@ func _process(delta: float) -> void:
 		sim_day_accum -= 4.0
 		_sim_daily_tick()
 	_refresh_hud()
+	_refresh_wanted_label()
 
 
 func _sim_daily_tick() -> void:
@@ -229,6 +243,7 @@ func _apply_tool_at_hover() -> void:
 		"road": _try_road(hover_cell.x, hover_cell.y)
 		"bulldoze": _try_bulldoze(hover_cell.x, hover_cell.y)
 	_refresh_hud()
+	_refresh_wanted_label()
 
 
 func _try_zone(x: int, z: int, color: int) -> void:
@@ -322,6 +337,13 @@ func _is_road_at(x: int, z: int) -> bool:
 func _toggle_controls() -> void:
 	if controls_overlay:
 		controls_overlay.visible = not controls_overlay.visible
+
+
+func _refresh_wanted_label() -> void:
+	var node := get_node_or_null("WantedLabel")
+	if node == null:
+		return
+	node.text = "WANTED: %d/5" % wanted_level
 
 
 func _refresh_controls() -> void:
@@ -751,6 +773,7 @@ func _build_hud() -> void:
 	hud_time_slider.value_changed.connect(func(v): _t = v; _apply_time())
 	cl.add_child(hud_time_slider)
 	_refresh_hud()
+	_refresh_wanted_label()
 
 
 
@@ -774,6 +797,21 @@ func _build_hud() -> void:
 	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
 	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n0/Space = Select\nClick to apply tool\nWASD = Move\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down"
 	controls_overlay.add_child(help)
+	# Wanted meter overlay (top-left)
+	var wanted_cl := CanvasLayer.new()
+	add_child(wanted_cl)
+	var wanted_bg := ColorRect.new()
+	wanted_bg.color = Color(0.85, 0.10, 0.10, 0.85)
+	wanted_bg.size = Vector2(220, 36)
+	wanted_bg.position = Vector2(12, 44)
+	wanted_cl.add_child(wanted_bg)
+	var wanted_lbl := Label.new()
+	wanted_lbl.name = "WantedLabel"
+	wanted_lbl.position = Vector2(20, 48)
+	wanted_lbl.add_theme_font_size_override("font_size", 16)
+	wanted_lbl.add_theme_color_override("font_color", Color(1, 1, 1))
+	wanted_lbl.text = "WANTED: 0/5"
+	wanted_cl.add_child(wanted_lbl)
 	_refresh_controls()
 
 func _abs_budget_fmt() -> String:
@@ -1003,6 +1041,210 @@ func _exit_building() -> void:
 	cam_player_pitch = -25.0
 
 
+func _try_enter_vehicle() -> void:
+	if vehicle_in:
+		return
+	# Find nearest car within 3m
+	var best: Dictionary = {}
+	var best_d: float = 9999.0
+	for v in vehicles:
+		var d: float = player_pos.distance_to(v["pos"])
+		if d < best_d:
+			best_d = d
+			best = v
+	if best_d > 3.5:
+		return
+	vehicle_in = true
+	current_vehicle = best["mesh"]
+	current_vehicle_pos = best["pos"]
+	current_vehicle_yaw = best["yaw"]
+	current_vehicle_speed = 0.0
+	# Hide player mesh; show in vehicle
+	player.visible = false
+	# Adjust camera
+	cam_player_dist = 7.0
+	cam_player_pitch = -15.0
+
+
+func _exit_vehicle() -> void:
+	if not vehicle_in:
+		return
+	vehicle_in = false
+	# Save vehicle state
+	for v in vehicles:
+		if v["mesh"] == current_vehicle:
+			v["pos"] = current_vehicle_pos
+			v["yaw"] = current_vehicle_yaw
+			v["speed"] = current_vehicle_speed
+			break
+	# Place player next to the vehicle
+	var exit_offset := Vector3(-2.5, 0.0, 0.0).rotated(Vector3.UP, current_vehicle_yaw)
+	player_pos = current_vehicle_pos + exit_offset
+	player.position = player_pos
+	player.visible = true
+	current_vehicle = null
+	cam_player_dist = 12.0
+	cam_player_pitch = -25.0
+
+
+func _update_vehicle(delta: float) -> void:
+	if not vehicle_in or current_vehicle == null:
+		return
+	# Acceleration / brake
+	var accel: float = 0.0
+	if Input.is_action_pressed("ui_up"):
+		accel = 14.0
+	elif Input.is_action_pressed("ui_down"):
+		accel = -10.0
+	else:
+		# Drag
+		current_vehicle_speed *= max(0.0, 1.0 - delta * 4.0)
+	current_vehicle_speed += accel * delta
+	current_vehicle_speed = clamp(current_vehicle_speed, -8.0, 18.0)
+	# Steering (only when moving)
+	var steer: float = 0.0
+	if Input.is_action_pressed("ui_left"):
+		steer = -1.0
+	elif Input.is_action_pressed("ui_right"):
+		steer = 1.0
+	if abs(current_vehicle_speed) > 0.1:
+		current_vehicle_yaw += steer * (1.6 * delta) * sign(current_vehicle_speed)
+	# Move
+	var fwd := Vector3(sin(current_vehicle_yaw), 0.0, cos(current_vehicle_yaw))
+	var new_pos: Vector3 = current_vehicle_pos + fwd * current_vehicle_speed * delta
+	# World bounds
+	var bound: float = HALF - CELL * 0.5
+	new_pos.x = clamp(new_pos.x, -bound, bound)
+	new_pos.z = clamp(new_pos.z, -bound, bound)
+	current_vehicle_pos = new_pos
+	current_vehicle.position = new_pos
+	current_vehicle.rotation.y = current_vehicle_yaw
+	# Move player too (so camera follows)
+	player_pos = new_pos
+	player.position = new_pos
+
+
+func _is_player_in_vehicle() -> bool:
+	return vehicle_in
+
+
+func _build_police() -> void:
+	# 2 police cars parked on a far road
+	for i in range(2):
+		var px: int = 0
+		var pz: int = (4 + i * 8) * ROAD_EVERY
+		var pos := Vector3(_wx(px * CELL + CELL * 0.5), 0.4, _wz(pz * CELL + CELL * 0.5))
+		var car := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(1.8, 0.7, 3.6)
+		car.mesh = bm
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.10, 0.15, 0.50)  # dark blue
+		car.material_override = mat
+		car.position = pos
+		add_child(car)
+		# Roof light bar
+		var lightbar := MeshInstance3D.new()
+		var lm := BoxMesh.new()
+		lm.size = Vector3(1.6, 0.15, 0.4)
+		lightbar.mesh = lm
+		var lmat := StandardMaterial3D.new()
+		lmat.albedo_color = Color(0.10, 0.10, 0.10)
+		lmat.emission_enabled = true
+		lmat.emission = Color(0.9, 0.2, 0.2)
+		lmat.emission_energy_multiplier = 0.5
+		lightbar.material_override = lmat
+		lightbar.position = pos + Vector3(0.0, 0.55, 0.0)
+		add_child(lightbar)
+		police.append({
+			"mesh": car,
+			"light": lightbar,
+			"pos": pos,
+			"yaw": 0.0,
+			"speed": 0.0,
+		})
+
+
+func _update_police(delta: float) -> void:
+	# Chase player when wanted > 0; otherwise return to station
+	for p in police:
+		var dist: float = p["pos"].distance_to(player_pos)
+		if wanted_level > 0 and dist > 3.0:
+			# Move toward player
+			var to_player: Vector3 = (player_pos - p["pos"])
+			to_player.y = 0
+			if to_player.length() > 0.1:
+				var target_yaw: float = atan2(to_player.x, to_player.z)
+				# Smooth turn
+				var diff: float = target_yaw - p["yaw"]
+				while diff > PI: diff -= TAU
+				while diff < -PI: diff += TAU
+				p["yaw"] += diff * min(1.0, delta * 4.0)
+				var forward_speed: float = 12.0 + wanted_level * 4.0
+				p["speed"] = lerpf(p["speed"], forward_speed, min(1.0, delta * 4.0))
+				var fwd := Vector3(sin(p["yaw"]), 0.0, cos(p["yaw"]))
+				p["pos"] += fwd * p["speed"] * delta
+		else:
+			# Return to idle
+			p["speed"] *= max(0.0, 1.0 - delta * 3.0)
+		p["mesh"].position = p["pos"]
+		p["mesh"].rotation.y = p["yaw"]
+		p["light"].position = p["pos"] + Vector3(0.0, 0.55, 0.0)
+		# Flash the lights when chasing
+		if wanted_level > 0:
+			var phase: float = fmod(Time.get_ticks_msec() / 200.0, 2.0)
+			var flash_col: Color = Color(0.9, 0.2, 0.2) if phase < 1.0 else Color(0.2, 0.4, 0.9)
+			p["light"].material_override.emission = flash_col
+		# Catch: end game if police touch player
+		if wanted_level > 0 and dist < 1.5:
+			_busted()
+		# Run over NPCs/player with a vehicle
+		if vehicle_in and current_vehicle != null:
+			var dveh: float = p["pos"].distance_to(current_vehicle_pos)
+			if dveh < 1.8:
+				# Player rammed a police car: instant wanted
+				wanted_level = clamp(wanted_level + 1, 0, 5)
+
+
+func _busted() -> void:
+	# Reset wanted, dock budget, take player to nearest cell (the police station)
+	wanted_level = 0
+	sim_budget -= 200
+	# Send player back to a road cell
+	player_pos = Vector3(_wx(4 * CELL), 0.7, _wz(8 * CELL))
+	player.position = player_pos
+	if vehicle_in:
+		_exit_vehicle()
+
+
+func _add_wanted(amount: int) -> void:
+	wanted_level = clamp(wanted_level + amount, 0, 5)
+	wanted_timer = 10.0  # seconds before it starts decaying
+
+
+func _update_wanted(delta: float) -> void:
+	if wanted_level == 0:
+		return
+	wanted_timer -= delta
+	if wanted_timer <= 0.0:
+		wanted_level = max(0, wanted_level - 1)
+		wanted_timer = 8.0
+
+
+func _draw_wanted_meter() -> void:
+	# Called from a CanvasLayer; shows stars in top-left
+	if hud_label == null:
+		return
+	var stars: String = ""
+	for i in range(5):
+		if i < wanted_level:
+			stars += "*"
+		else:
+			stars += "."
+	# Append to HUD via overlay
+	# (We piggyback on hud_label; full overlay below in HUD layer)
+	pass
+
 func save_city() -> void:
 	var data := {
 		"version": 2,
@@ -1011,6 +1253,7 @@ func save_city() -> void:
 		"sim_budget": sim_budget,
 		"sim_population": sim_population,
 		"sim_speed": sim_speed,
+		"wanted_level": wanted_level,
 		"player_pos": [player_pos.x, player_pos.y, player_pos.z],
 		"buildings": [],
 		"custom_roads": [],
@@ -1063,6 +1306,7 @@ func load_city() -> void:
 	sim_budget = int(data.get("sim_budget", 20000))
 	sim_population = int(data.get("sim_population", 1250))
 	sim_speed = float(data.get("sim_speed", 1.0))
+	wanted_level = int(data.get("wanted_level", 0))
 	if data.has("player_pos") and data.player_pos is Array and data.player_pos.size() == 3:
 		player_pos = Vector3(float(data.player_pos[0]), float(data.player_pos[1]), float(data.player_pos[2]))
 		if player:
