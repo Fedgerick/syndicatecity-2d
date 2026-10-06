@@ -85,6 +85,7 @@ func _ready() -> void:
 	_build_light_env()
 	_build_camera()
 	_build_player()
+	_build_minimap()
 	_build_hud()
 	demand_bars_root = Node.new()
 	hud_label.add_child(demand_bars_root)
@@ -133,6 +134,7 @@ func _process(delta: float) -> void:
 		_sim_daily_tick()
 	_refresh_hud()
 	_refresh_wanted_label()
+	_update_minimap()
 
 
 func _sim_daily_tick() -> void:
@@ -244,6 +246,7 @@ func _apply_tool_at_hover() -> void:
 		"bulldoze": _try_bulldoze(hover_cell.x, hover_cell.y)
 	_refresh_hud()
 	_refresh_wanted_label()
+	_update_minimap()
 
 
 func _try_zone(x: int, z: int, color: int) -> void:
@@ -743,6 +746,11 @@ func _refresh_camera() -> void:
 
 
 var hud_label: Label
+var minimap_image: Image
+var minimap_texture: ImageTexture
+var minimap_sprite: Sprite2D
+var minimap_dirty: bool = true
+var minimap_grid: Dictionary = {}  # key -> color string
 var hud_time_slider: HSlider
 
 func _build_hud() -> void:
@@ -774,6 +782,7 @@ func _build_hud() -> void:
 	cl.add_child(hud_time_slider)
 	_refresh_hud()
 	_refresh_wanted_label()
+	_update_minimap()
 
 
 
@@ -1244,6 +1253,88 @@ func _draw_wanted_meter() -> void:
 	# Append to HUD via overlay
 	# (We piggyback on hud_label; full overlay below in HUD layer)
 	pass
+
+
+
+func _build_minimap() -> void:
+	# 256x256 minimap in bottom-left corner
+	var w: int = 256
+	var h: int = 256
+	minimap_image = Image.create(w, h, false, Image.FORMAT_RGB8)
+	minimap_image.fill(Color(0.05, 0.10, 0.05))
+	minimap_texture = ImageTexture.create_from_image(minimap_image)
+	var sprite := Sprite2D.new()
+	sprite.texture = minimap_texture
+	sprite.position = Vector2(140, 720 - 140)
+	# Add to a CanvasLayer so it stays on screen
+	var cl := CanvasLayer.new()
+	cl.layer = 5
+	add_child(cl)
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.7)
+	bg.size = Vector2(w + 16, h + 36)
+	bg.position = Vector2(8, 720 - h - 28)
+	cl.add_child(bg)
+	var title := Label.new()
+	title.text = "MAP"
+	title.position = Vector2(16, 720 - h - 24)
+	title.add_theme_color_override("font_color", Color(1, 1, 1))
+	cl.add_child(title)
+	cl.add_child(sprite)
+	minimap_sprite = sprite
+
+
+func _update_minimap() -> void:
+	if minimap_image == null:
+		return
+	# World extent
+	var w: int = 256
+	var h: int = 256
+	var world_size: float = GRID * CELL  # 64m
+	var scale: float = w / world_size
+	minimap_image.fill(Color(0.05, 0.10, 0.05))
+	# Draw roads
+	for z in range(0, GRID, ROAD_EVERY):
+		for x in range(GRID):
+			var wx: float = _wx(x * CELL)
+			var wz: float = _wz(z * CELL)
+			var px: int = int((wx + world_size / 2.0) * scale)
+			var py: int = int((wz + world_size / 2.0) * scale)
+			draw_dot_on_map(px, py, Color(0.35, 0.35, 0.40))
+	for x in range(0, GRID, ROAD_EVERY):
+		for z in range(GRID):
+			var wx2: float = _wx(x * CELL)
+			var wz2: float = _wz(z * CELL)
+			var px2: int = int((wx2 + world_size / 2.0) * scale)
+			var py2: int = int((wz2 + world_size / 2.0) * scale)
+			draw_dot_on_map(px2, py2, Color(0.35, 0.35, 0.40))
+	# Draw buildings
+	for b in placed_buildings:
+		var bx: float = _wx(b.x * CELL)
+		var bz: float = _wz(b.y * CELL)
+		var px: int = int((bx + world_size / 2.0) * scale)
+		var py: int = int((bz + world_size / 2.0) * scale)
+		var col: Color = Color(0.95, 0.85, 0.30) if b.z == 0 else (Color(0.30, 0.55, 0.95) if b.z == 1 else Color(0.85, 0.55, 0.30))
+		draw_dot_on_map(px, py, col)
+	# Draw police
+	for po in police:
+		var ppx: int = int((po["pos"].x + world_size / 2.0) * scale)
+		var ppy: int = int((po["pos"].z + world_size / 2.0) * scale)
+		draw_dot_on_map(ppx, ppy, Color(0.10, 0.10, 0.95))
+	# Draw player (yellow arrow)
+	var plx: int = int((player_pos.x + world_size / 2.0) * scale)
+	var ply: int = int((player_pos.z + world_size / 2.0) * scale)
+	draw_dot_on_map(plx, ply, Color(1, 1, 0))
+	minimap_texture.update(minimap_image)
+
+
+func draw_dot_on_map(px: int, py: int, col: Color) -> void:
+	for dx in [-1, 0, 1]:
+		for dy in [-1, 0, 1]:
+			var nx: int = px + dx
+			var ny: int = py + dy
+			if nx >= 0 and nx < 256 and ny >= 0 and ny < 256:
+				minimap_image.set_pixel(nx, ny, col)
 
 func save_city() -> void:
 	var data := {
