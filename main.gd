@@ -18,6 +18,22 @@ var _t := 0.5
 var lamps: Array[MeshInstance3D] = []
 var buildings_root: Node3D
 var placed_buildings: Array[Vector3i] = []  # (x, z, color_index)
+
+# ---- Sim layer (SimCity foundation) ----
+var sim_population: int = 1250
+var sim_budget: int = 20000
+var sim_day_count: int = 0
+var sim_residential_demand: float = 50.0  # 0-100
+var sim_commercial_demand: float = 50.0
+var sim_industrial_demand: float = 50.0
+var sim_tax_rate: float = 0.09
+var sim_residential_tax_rate: float = 0.09
+var sim_income_today: int = 0
+var sim_expenses_today: int = 0
+var growth_accum: float = 0.0
+var sim_day_accum: float = 0.0  # seconds until next sim day
+var sim_unlocked: Array[String] = ["Basic Zone"]
+var demand_bars_root: Node
 var cam_pitch := -50.0
 var cam_yaw := 35.0
 var cam_dist := 90.0
@@ -40,6 +56,8 @@ func _ready() -> void:
 	_build_light_env()
 	_build_camera()
 	_build_hud()
+	demand_bars_root = Node.new()
+	hud_label.add_child(demand_bars_root)
 
 	var args := OS.get_cmdline_user_args()
 	for a in args:
@@ -61,7 +79,6 @@ func _ready() -> void:
 		get_tree().quit(0)
 
 
-var growth_accum := 0.0
 
 func _process(delta: float) -> void:
 	# Slowly advance time so user sees day/night if windowed
@@ -74,7 +91,57 @@ func _process(delta: float) -> void:
 	if growth_accum > 0.5:
 		growth_accum -= 0.5
 		_grow_random_cell()
+	# Daily tick: 1 sim day = 4 real seconds
+	sim_day_accum += delta
+	if sim_day_accum > 4.0:
+		sim_day_accum -= 4.0
+		_sim_daily_tick()
 	_refresh_hud()
+
+
+func _sim_daily_tick() -> void:
+	# Count buildings by zone type (color_index 0=residential, 1=commercial, 2=industrial)
+	var r_count: int = 0
+	var c_count: int = 0
+	var i_count: int = 0
+	for b in placed_buildings:
+		match b.z:
+			0: r_count += 1
+			1: c_count += 1
+			2: i_count += 1
+
+	# Demand: R wants jobs nearby; C wants residents; I wants commercial
+	# SimCity-ish: R demand = 100 - clamp(jobs/2, 0, 100) + residential quality
+	var r_base: float = 100.0 - clamp(c_count * 4.0, 0.0, 80.0) + (sim_budget / 500.0)
+	var c_base: float = clamp(r_count * 6.0, 0.0, 100.0) - (i_count * 2.0)
+	var i_base: float = clamp(c_count * 5.0, 0.0, 100.0) - (r_count * 1.0)
+	sim_residential_demand = clamp(r_base, 0.0, 100.0)
+	sim_commercial_demand = clamp(c_base, 0.0, 100.0)
+	sim_industrial_demand = clamp(i_base, 0.0, 100.0)
+
+	# Population grows when residential zones exist and demand is decent
+	var pop_target: float = r_count * 12.0
+	if sim_residential_demand > 60.0 and r_count > 0:
+		pop_target *= 1.4
+	elif sim_residential_demand < 25.0:
+		pop_target *= 0.7
+	pop_target = clamp(pop_target, 0.0, 50000.0)
+	# Move sim_population 10% toward target each day
+	sim_population = int(sim_population * 0.9 + pop_target * 0.1)
+	if sim_population < 100 and r_count > 0:
+		sim_population = 100
+
+	# Tax income (per-capita daily, scaled by demand)
+	var per_cap: float = 4.0 + (sim_residential_demand / 50.0) * 2.0
+	sim_income_today = int(sim_population * per_cap * sim_residential_tax_rate * 30.0)  # ~monthly rate
+	sim_expenses_today = int(r_count * 5 + c_count * 8 + i_count * 12)  # per-day upkeep
+	sim_budget += sim_income_today - sim_expenses_today
+
+	# Budget floor: if money runs out, demand drops (people leave)
+	if sim_budget < -2000:
+		sim_residential_demand = max(0.0, sim_residential_demand - 20.0)
+
+	sim_day_count += 1
 
 
 func _grow_random_cell() -> void:
@@ -418,9 +485,57 @@ func _build_hud() -> void:
 	_refresh_hud()
 
 
+
+
+func _abs_budget_fmt() -> String:
+	var v: int = sim_budget if sim_budget >= 0 else -sim_budget
+	if v >= 1000000: return "%d.%dM" % [v / 1000000, (v % 1000000) / 100000]
+	if v >= 1000: return "%d,%03d" % [v / 1000, v % 1000]
+	return str(v)
+
+func _refresh_demand_bars() -> void:
+	# Three coloured bars at the right side of the HUD: R (green) C (blue) I (red)
+	if demand_bars_root == null:
+		return
+	for child in demand_bars_root.get_children():
+		child.queue_free()
+	var bar_w: float = 120.0
+	var bar_h: float = 14.0
+	var base_x: float = 760.0
+	var base_y: float = 8.0
+	var labels: Array = ["R", "C", "I"]
+	var cols: Array = [Color(0.40, 0.85, 0.40), Color(0.40, 0.55, 0.95), Color(0.85, 0.55, 0.30)]
+	var vals: Array = [sim_residential_demand, sim_commercial_demand, sim_industrial_demand]
+	for i in range(3):
+		var lbl := Label.new()
+		lbl.text = labels[i]
+		lbl.add_theme_color_override("font_color", cols[i])
+		lbl.add_theme_color_override("font_outline_color", Color.BLACK)
+		lbl.add_theme_constant_override("outline_size", 2)
+		lbl.position = Vector2(base_x, base_y + i * (bar_h + 2))
+		demand_bars_root.add_child(lbl)
+		var bg := ColorRect.new()
+		bg.color = Color(0.1, 0.1, 0.1, 0.7)
+		bg.position = Vector2(base_x + 16, base_y + i * (bar_h + 2))
+		bg.size = Vector2(bar_w, bar_h)
+		demand_bars_root.add_child(bg)
+		var fill := ColorRect.new()
+		fill.color = cols[i]
+		fill.position = Vector2(base_x + 16, base_y + i * (bar_h + 2))
+		fill.size = Vector2(bar_w * (vals[i] / 100.0), bar_h)
+		demand_bars_root.add_child(fill)
+
 func _refresh_hud() -> void:
 	if hud_label:
-		hud_label.text = "SYNDICATE CITY   Feb 1926   $20,000   Pop 1,250   placed=%d" % placed_buildings.size()
+		var bsign: String = "-" if sim_budget < 0 else ""
+		hud_label.text = "SYNDICATE CITY   Day %d   $%s%s   Pop %d   placed=%d" % [
+			sim_day_count,
+			bsign,
+			_abs_budget_fmt(),
+			sim_population,
+			placed_buildings.size()]
+	if demand_bars_root != null:
+		_refresh_demand_bars()
 var traffic_dots: Array[MeshInstance3D] = []
 var traffic_paths: Array = []  # each = Array of Vector3 world positions
 
