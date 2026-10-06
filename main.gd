@@ -33,6 +33,12 @@ var sim_expenses_today: int = 0
 var growth_accum: float = 0.0
 var sim_day_accum: float = 0.0  # seconds until next sim day
 var sim_unlocked: Array[String] = ["Basic Zone"]
+var missions: Array = []  # active missions
+var completed_missions: Array = []  # strings of completed mission IDs
+var current_mission: Dictionary = {}
+var mission_overlay: CanvasLayer
+var mission_label: Label
+var mission_objective: Label
 var wanted_level: int = 0  # 0..5 stars
 var wanted_timer: float = 0.0
 var police: Array = []  # list of {mesh, pos, target_pos, speed}
@@ -82,6 +88,8 @@ func _ready() -> void:
 	_build_initial_buildings()
 	_build_lamps()
 	_build_police()
+	_build_burglar()
+	_setup_missions()
 	_build_light_env()
 	_build_camera()
 	_build_player()
@@ -118,6 +126,7 @@ func _process(delta: float) -> void:
 	_update_traffic(delta)
 	_update_cars(delta)
 	_update_police(delta)
+	_update_mission(delta)
 	_update_wanted(delta)
 	_update_npcs(delta)
 	_update_player(delta)
@@ -804,7 +813,7 @@ func _build_hud() -> void:
 	help.position = Vector2(920, 90)
 	help.add_theme_font_size_override("font_size", 14)
 	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
-	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n0/Space = Select\nClick to apply tool\nWASD = Move\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down"
+	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n0/Space = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down\nM = Next mission"
 	controls_overlay.add_child(help)
 	# Wanted meter overlay (top-left)
 	var wanted_cl := CanvasLayer.new()
@@ -1335,6 +1344,114 @@ func draw_dot_on_map(px: int, py: int, col: Color) -> void:
 			var ny: int = py + dy
 			if nx >= 0 and nx < 256 and ny >= 0 and ny < 256:
 				minimap_image.set_pixel(nx, ny, col)
+
+func _setup_missions() -> void:
+	# Mission 1: collect bounty on a criminal hiding in the city
+	var m1 := {
+		"id": "bust_the_burglar",
+		"name": "Bust the Burglar",
+		"brief": "Find the burglar in the residential zone and arrest them.",
+		"objective": "Locate the burglar (red capsule near residential)",
+		"status": "active",
+		"target_pos": Vector3(_wx(12 * CELL), 0.7, _wz(4 * CELL)),
+		"target_radius": 3.0,
+		"reward": 500,
+	}
+	missions.append(m1)
+	current_mission = m1
+	_build_mission_overlay()
+
+
+func _build_mission_overlay() -> void:
+	mission_overlay = CanvasLayer.new()
+	mission_overlay.layer = 4
+	add_child(mission_overlay)
+	var bg := ColorRect.new()
+	bg.color = Color(0.10, 0.20, 0.40, 0.85)
+	bg.size = Vector2(520, 60)
+	bg.position = Vector2(370, 700)
+	mission_overlay.add_child(bg)
+	mission_label = Label.new()
+	mission_label.text = ""
+	mission_label.position = Vector2(380, 706)
+	mission_label.add_theme_font_size_override("font_size", 16)
+	mission_label.add_theme_color_override("font_color", Color(1, 1, 0.4))
+	mission_overlay.add_child(mission_label)
+	mission_objective = Label.new()
+	mission_objective.text = ""
+	mission_objective.position = Vector2(380, 728)
+	mission_objective.add_theme_font_size_override("font_size", 13)
+	mission_objective.add_theme_color_override("font_color", Color(1, 1, 1))
+	mission_overlay.add_child(mission_objective)
+	_refresh_mission_overlay()
+
+
+func _refresh_mission_overlay() -> void:
+	if mission_label == null or mission_objective == null:
+		return
+	if current_mission.is_empty():
+		mission_label.text = "No mission"
+		mission_objective.text = ""
+		return
+	mission_label.text = "MISSION: %s   [%s]" % [current_mission["name"], current_mission["status"].to_upper()]
+	if current_mission["status"] == "active":
+		mission_objective.text = current_mission["objective"]
+	elif current_mission["status"] == "complete":
+		mission_objective.text = "MISSION COMPLETE! Press M for next mission."
+	elif current_mission["status"] == "failed":
+		mission_objective.text = "Mission failed."
+
+
+func _update_mission(delta: float) -> void:
+	if current_mission.is_empty() or current_mission.get("status") != "active":
+		return
+	var d: float = player_pos.distance_to(current_mission["target_pos"])
+	if d < current_mission["target_radius"]:
+		_complete_mission()
+
+
+func _complete_mission() -> void:
+	current_mission["status"] = "complete"
+	var reward: int = current_mission.get("reward", 0)
+	sim_budget += reward
+	completed_missions.append(current_mission["id"])
+	_refresh_mission_overlay()
+
+
+func _next_mission() -> void:
+	# Queue next mission: chase a bank robber
+	var m2 := {
+		"id": "chase_the_bank_robber",
+		"name": "Bank Robbery in Progress",
+		"brief": "Pursue the robber's getaway car.",
+		"objective": "Drive within 5m of the robber's vehicle",
+		"status": "active",
+		"target_pos": Vector3(_wx(28 * CELL), 0.5, _wz(20 * CELL)),
+		"target_radius": 5.0,
+		"reward": 1500,
+	}
+	missions.append(m2)
+	current_mission = m2
+	_refresh_mission_overlay()
+
+
+func _build_burglar() -> void:
+	# Visual: red capsule marking the mission target
+	var b := MeshInstance3D.new()
+	var capsule := CapsuleMesh.new()
+	capsule.height = 1.5
+	capsule.radius = 0.30
+	b.mesh = capsule
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.85, 0.10, 0.10)
+	mat.emission_enabled = true
+	mat.emission = Color(0.4, 0.05, 0.05)
+	mat.emission_energy_multiplier = 0.5
+	b.material_override = mat
+	b.position = Vector3(_wx(12 * CELL), 0.75, _wz(4 * CELL))
+	b.name = "Burglar"
+	add_child(b)
+
 
 func save_city() -> void:
 	var data := {
