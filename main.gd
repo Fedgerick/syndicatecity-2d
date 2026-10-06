@@ -852,9 +852,15 @@ func _update_traffic(delta: float) -> void:
 
 func save_city() -> void:
 	var data := {
-		"version": 1,
+		"version": 2,
 		"t": _t,
+		"sim_day_count": sim_day_count,
+		"sim_budget": sim_budget,
+		"sim_population": sim_population,
+		"sim_speed": sim_speed,
+		"player_pos": [player_pos.x, player_pos.y, player_pos.z],
 		"buildings": [],
+		"custom_roads": [],
 	}
 	for i in placed_buildings.size():
 		var c: Vector3i = placed_buildings[i]
@@ -865,11 +871,13 @@ func save_city() -> void:
 			"color": cell_color.get(key, 0),
 			"density": cell_density.get(key, 1),
 		})
+	for r in custom_roads:
+		data.custom_roads.append({"x": r.x, "y": r.y})
 	var path := "user://city_save.json"
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	f.store_string(JSON.stringify(data))
 	f.close()
-	print("SAVE: %d buildings -> %s" % [data.buildings.size(), path])
+	print("SAVE: %d buildings, $", placed_buildings.size(), sim_budget, " day ", sim_day_count)
 
 
 func load_city() -> void:
@@ -889,11 +897,26 @@ func load_city() -> void:
 	placed_buildings.clear()
 	cell_density.clear()
 	cell_color.clear()
+	# Wipe custom roads
+	custom_roads.clear()
+	for n in get_tree().get_nodes_in_group("custom_road"):
+		n.queue_free()
 	# Load new city
 	for entry in data.buildings:
 		_place_building(int(entry.x), int(entry.z), int(entry.color), int(entry.density))
+	for r in data.get("custom_roads", []):
+		_try_road(int(r.x), int(r.y))
+	sim_day_count = int(data.get("sim_day_count", 0))
+	sim_budget = int(data.get("sim_budget", 20000))
+	sim_population = int(data.get("sim_population", 1250))
+	sim_speed = float(data.get("sim_speed", 1.0))
+	if data.has("player_pos") and data.player_pos is Array and data.player_pos.size() == 3:
+		player_pos = Vector3(float(data.player_pos[0]), float(data.player_pos[1]), float(data.player_pos[2]))
+		if player:
+			player.position = player_pos
 	_t = float(data.get("t", 0.5))
-	print("LOAD: %d buildings" % placed_buildings.size())
+	_apply_time()
+	print("LOAD: %d buildings, $", placed_buildings.size(), sim_budget, " day ", sim_day_count)
 var cars: Array[MeshInstance3D] = []
 
 
