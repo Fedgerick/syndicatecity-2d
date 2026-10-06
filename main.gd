@@ -47,6 +47,14 @@ var cam_yaw := 35.0
 var cam_dist := 90.0
 var cam_topdown := false
 var hover_cell := Vector2i(-1, -1)
+# Tool state: "select" | "zone_res" | "zone_com" | "zone_ind" | "bulldoze" | "road"
+var current_tool: String = "select"
+var tool_cost_zone: int = 100
+var tool_cost_road: int = 10
+var tool_cost_bulldoze: int = 1
+var sim_speed: float = 1.0
+var controls_overlay: CanvasLayer
+var controls_label: Label
 
 
 func _ready() -> void:
@@ -175,10 +183,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			hover_cell = Vector2i(int(round(hit.x / CELL)), int(round(hit.z / CELL)))
 	elif event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-			if hover_cell.x >= 0 and hover_cell.y >= 0:
-				if not _is_road(hover_cell.x, hover_cell.y) and _in_bounds(hover_cell.x, hover_cell.y):
-					if not _is_water(hover_cell.x, hover_cell.y):
-						_place_building(hover_cell.x, hover_cell.y, randi() % 3, DENSITY_LOW)
+			_apply_tool_at_hover()
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
 			cam_dist = maxf(cam_dist - 5, 20.0)
 			_refresh_camera()
@@ -187,13 +192,148 @@ func _unhandled_input(event: InputEvent) -> void:
 			_refresh_camera()
 	elif event is InputEventKey and event.pressed:
 		match event.keycode:
-			KEY_T:
-				cam_topdown = not cam_topdown
+			KEY_1: current_tool = "zone_res"
+			KEY_2: current_tool = "zone_com"
+			KEY_3: current_tool = "zone_ind"
+			KEY_4: current_tool = "road"
+			KEY_5: current_tool = "bulldoze"
+			KEY_0, KEY_SPACE: current_tool = "select"
+			KEY_T: cam_topdown = not cam_topdown; _refresh_camera()
+			KEY_F5: save_city()
+			KEY_F9: load_city()
+			KEY_PLUS, KEY_KP_ADD: sim_speed = clamp(sim_speed * 1.5, 0.25, 8.0)
+			KEY_MINUS, KEY_KP_SUBTRACT: sim_speed = clamp(sim_speed / 1.5, 0.25, 8.0)
+			KEY_H: _toggle_controls()
+			KEY_C:
+				cam_thirdperson = true
+				_refresh_player_camera()
+			KEY_V:
+				cam_thirdperson = false
 				_refresh_camera()
-			KEY_F5:
-				save_city()
-			KEY_F9:
-				load_city()
+		_refresh_controls()
+
+
+func _apply_tool_at_hover() -> void:
+	if hover_cell.x < 0 or hover_cell.y < 0:
+		return
+	if not _in_bounds(hover_cell.x, hover_cell.y):
+		return
+	match current_tool:
+		"zone_res": _try_zone(hover_cell.x, hover_cell.y, 0)
+		"zone_com": _try_zone(hover_cell.x, hover_cell.y, 1)
+		"zone_ind": _try_zone(hover_cell.x, hover_cell.y, 2)
+		"road": _try_road(hover_cell.x, hover_cell.y)
+		"bulldoze": _try_bulldoze(hover_cell.x, hover_cell.y)
+	_refresh_hud()
+
+
+func _try_zone(x: int, z: int, color: int) -> void:
+	if _is_water(x, z):
+		return
+	if sim_budget < tool_cost_zone:
+		return
+	for i in range(placed_buildings.size()):
+		var b: Vector3i = placed_buildings[i]
+		if b.x == x and b.y == z:
+			var cur_density: int = cell_density.get(_bk(x, z), 0)
+			if b.z == color and sim_budget >= tool_cost_zone:
+				if cur_density >= 3:
+					return
+				sim_budget -= tool_cost_zone
+				cell_density[_bk(x, z)] = cur_density + 1
+				_refresh_building_at(x, z)
+				return
+			else:
+				if sim_budget >= tool_cost_zone + tool_cost_bulldoze:
+					sim_budget -= tool_cost_bulldoze
+					sim_budget -= tool_cost_zone
+					placed_buildings[i] = Vector3i(x, z, color)
+					cell_density[_bk(x, z)] = 0
+					_refresh_building_at(x, z)
+					return
+				return
+	if not _is_road_adjacent(x, z):
+		return
+	sim_budget -= tool_cost_zone
+	_place_building(x, z, color, 0)
+
+func _bk(x: int, z: int) -> String:
+	return "%d,%d" % [x, z]
+
+
+func _is_road_adjacent(x: int, z: int) -> bool:
+	for dx in [-1, 0, 1]:
+		for dz in [-1, 0, 1]:
+			if dx == 0 and dz == 0:
+				continue
+			if _is_road_at(x + dx, z + dz):
+				return true
+	return false
+
+
+func _try_road(x: int, z: int) -> void:
+	if sim_budget < tool_cost_road:
+		return
+	for b in placed_buildings:
+		if b.x == x and b.y == z:
+			return
+	if _is_water(x, z):
+		return
+	sim_budget -= tool_cost_road
+	var strip := _make_box(Vector3(CELL * 0.95, 0.05, CELL * 0.95),
+		Vector3(_wx(x * CELL), 0.025, _wz(z * CELL)),
+		Color(0.20, 0.20, 0.22))
+	strip.add_to_group("custom_road")
+	add_child(strip)
+	if not custom_roads.has(Vector2i(x, z)):
+		custom_roads.append(Vector2i(x, z))
+
+
+func _try_bulldoze(x: int, z: int) -> void:
+	for i in range(placed_buildings.size()):
+		var b: Vector3i = placed_buildings[i]
+		if b.x == x and b.y == z:
+			sim_budget += tool_cost_zone / 2
+			placed_buildings.remove_at(i)
+			_refresh_building_at(x, z)
+			return
+	for i in range(custom_roads.size()):
+		if custom_roads[i].x == x and custom_roads[i].y == z:
+			sim_budget += tool_cost_road / 2
+			custom_roads.remove_at(i)
+			for n in get_tree().get_nodes_in_group("custom_road"):
+				n.queue_free()
+			return
+
+
+func _is_road_at(x: int, z: int) -> bool:
+	if _is_road(x, z):
+		return true
+	for r in custom_roads:
+		if r.x == x and r.y == z:
+			return true
+	return false
+
+
+func _toggle_controls() -> void:
+	if controls_overlay:
+		controls_overlay.visible = not controls_overlay.visible
+
+
+func _refresh_controls() -> void:
+	if controls_label == null:
+		return
+	var tool_name: String = ""
+	match current_tool:
+		"zone_res": tool_name = "RES ZONE $100"
+		"zone_com": tool_name = "COM ZONE $100"
+		"zone_ind": tool_name = "IND ZONE $100"
+		"road": tool_name = "ROAD $10"
+		"bulldoze": tool_name = "BULLDOZE"
+		_: tool_name = "SELECT"
+	controls_label.text = "Tool: %s   Speed: %.2fx   [H] Help" % [tool_name, sim_speed]
+
+
 
 
 func _raycast_ground(screen_pos: Vector2) -> Vector3:
@@ -333,6 +473,7 @@ const DENSITY_LOW := 1
 const DENSITY_MED := 2
 const DENSITY_HIGH := 3
 const DENSITY_MAX := 4
+var custom_roads: Array[Vector2i] = []
 var building_meshes: Array[MeshInstance3D] = []
 var cell_density: Dictionary = {}  # key "x,y:z" -> density stage
 var cell_color: Dictionary = {}    # key -> color index
@@ -582,6 +723,27 @@ func _build_hud() -> void:
 
 
 
+
+	# Controls overlay (top-right under time slider)
+	controls_overlay = CanvasLayer.new()
+	add_child(controls_overlay)
+	var ctl_bg := ColorRect.new()
+	ctl_bg.color = Color(0, 0, 0, 0.65)
+	ctl_bg.size = Vector2(360, 240)
+	ctl_bg.position = Vector2(910, 40)
+	controls_overlay.add_child(ctl_bg)
+	controls_label = Label.new()
+	controls_label.position = Vector2(920, 50)
+	controls_label.add_theme_font_size_override("font_size", 16)
+	controls_label.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
+	controls_overlay.add_child(controls_label)
+	var help := Label.new()
+	help.position = Vector2(920, 90)
+	help.add_theme_font_size_override("font_size", 14)
+	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
+	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n0/Space = Select\nClick to apply tool\nWASD = Move\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down"
+	controls_overlay.add_child(help)
+	_refresh_controls()
 
 func _abs_budget_fmt() -> String:
 	var v: int = sim_budget if sim_budget >= 0 else -sim_budget
