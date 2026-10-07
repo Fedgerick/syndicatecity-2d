@@ -38,6 +38,12 @@ var completed_missions: Array = []
 var stats_npcs_killed: int = 0
 var stats_cars_smashed: int = 0
 var stats_money_earned: int = 0
+var stats_missions_failed: int = 0
+var total_play_time: float = 0.0  # seconds in this session
+var game_complete: bool = false
+var final_score: int = 0
+var final_rank: String = ""
+var final_cl: CanvasLayer
 var stats_bullets_fired: int = 0
 var stats_distance_walked: float = 0.0  # strings of completed mission IDs
 var current_mission: Dictionary = {}
@@ -49,11 +55,23 @@ var wanted_timer: float = 0.0
 var police: Array = []  # list of {mesh, pos, target_pos, speed}
 var pickups: Array = []
 var bullets: Array = []  # {mesh, pos, vel, ttl}
+var bullet_template: Mesh
 var bullet_cooldown: float = 0.0  # {mesh, pos, type: "money"|"health", value}
 var player_health: int = 100
+var player_max_health: int = 100
+var ammo: int = 30  # bullets left
+var max_ammo: int = 30
+var last_shot_time: float = 0.0
+var total_deaths: int = 0  # times player was busted/killed
+var total_respawns: int = 0
+var player_invulnerable: float = 0.0  # seconds of i-frames after respawn
+var announcement_label: Label  # big yellow banner for unlocks, mission start, etc.
+var announcement_timer: float = 0.0
 var audio_on: bool = true
 var menu_cl: CanvasLayer
 var menu_label: Label
+var buy_menu_open: bool = false
+var buy_menu_cl: CanvasLayer
 var vehicle_in: bool = false  # true when player is driving a car
 var current_vehicle: MeshInstance3D
 var current_vehicle_pos: Vector3
@@ -110,6 +128,11 @@ func _ready() -> void:
 	_build_minimap()
 	_build_stats_overlay()
 	_build_main_menu()
+	_build_buy_menu()
+	bullet_template = CylinderMesh.new()
+	bullet_template.top_radius = 0.06
+	bullet_template.bottom_radius = 0.06
+	bullet_template.height = 0.4
 	_build_hud()
 	demand_bars_root = Node.new()
 	hud_label.add_child(demand_bars_root)
@@ -1312,6 +1335,209 @@ func _update_wanted(delta: float) -> void:
 	if wanted_timer <= 0.0:
 		wanted_level = max(0, wanted_level - 1)
 		wanted_timer = 8.0
+	# If wanted is 5 for too long, current mission fails
+	if wanted_level == 5 and current_mission and not current_mission.is_empty():
+		if not current_mission.get("fail_timer", 0.0):
+			current_mission["fail_timer"] = 0.0
+		current_mission["fail_timer"] = current_mission.get("fail_timer", 0.0) + delta
+		if current_mission["fail_timer"] > 12.0:
+			# Mission failed
+			stats_missions_failed += 1
+			_announce("MISSION FAILED: " + str(current_mission.get("title", "?")) + " - Wanted too high!", Color(1, 0.4, 0.4))
+			_next_mission()
+	_update_player_status(delta)
+	_update_announcement(delta)
+	total_play_time += delta
+	if not game_complete and completed_missions.size() >= missions.size() and missions.size() > 0:
+		_show_game_complete()
+
+
+
+
+
+func _update_player_status(delta: float) -> void:
+	# Invulnerability frames
+	if player_invulnerable > 0.0:
+		player_invulnerable -= delta
+		# Blink the player mesh
+		if player:
+			var v: float = abs(sin(Time.get_ticks_msec() * 0.02))
+			player.visible = v > 0.4
+	else:
+		if player:
+			player.visible = true
+	# Clamp health, kill if zero
+	if player_health <= 0:
+		_on_player_death()
+	# Ammo reload at home? No, buy at store.
+
+
+func _on_player_death() -> void:
+	# Player killed by something (police crash, etc). Reset.
+	total_deaths += 1
+	player_health = player_max_health
+	player_invulnerable = 3.0
+	wanted_level = max(0, wanted_level - 2)
+	# Spawn player at hospital area
+	player_pos = Vector3(_wx(8 * CELL), 0.7, _wz(12 * CELL))
+	if player:
+		player.position = player_pos
+	if vehicle_in:
+		_exit_vehicle()
+	_announce("RESPAWNED AT HOSPITAL", Color(0.7, 0.9, 0.7))
+	_play_beep(220, 0.3, 0.4)
+
+
+func _announce(text: String, col: Color = Color(1, 0.85, 0.2)) -> void:
+	# Set the text and reset the timer; displayed in _process for a few seconds
+	if announcement_label == null:
+		# Build it
+		var cl := CanvasLayer.new()
+		cl.layer = 8
+		add_child(cl)
+		announcement_label = Label.new()
+		announcement_label.add_theme_font_size_override("font_size", 36)
+		announcement_label.add_theme_color_override("font_color", col)
+		announcement_label.position = Vector2(640, 240)
+		announcement_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		announcement_label.size = Vector2(800, 50)
+		cl.add_child(announcement_label)
+	announcement_label.text = text
+	announcement_label.add_theme_color_override("font_color", col)
+	announcement_timer = 3.0
+
+
+func _update_announcement(delta: float) -> void:
+	if announcement_timer > 0.0:
+		announcement_timer -= delta
+		if announcement_label:
+			# Fade out at end
+			var a: float = clamp(announcement_timer / 1.0, 0.0, 1.0)
+			var col: Color = announcement_label.get_theme_color("font_color")
+			col.a = a
+			announcement_label.modulate = Color(1, 1, 1, a)
+		if announcement_timer <= 0.0 and announcement_label:
+			announcement_label.text = ""
+
+
+func _build_buy_menu() -> void:
+	buy_menu_cl = CanvasLayer.new()
+	buy_menu_cl.layer = 7
+	add_child(buy_menu_cl)
+	var bg := ColorRect.new()
+	bg.color = Color(0.02, 0.05, 0.10, 0.92)
+	bg.size = Vector2(520, 360)
+	bg.position = Vector2(380, 180)
+	buy_menu_cl.add_child(bg)
+	var title := Label.new()
+	title.text = "STORE (press B)"
+	title.position = Vector2(390, 195)
+	title.add_theme_font_size_override("font_size", 28)
+	title.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
+	buy_menu_cl.add_child(title)
+	var hint := Label.new()
+	hint.text = "Buy with $ to keep playing."
+	hint.position = Vector2(390, 235)
+	hint.add_theme_font_size_override("font_size", 14)
+	hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.8))
+	buy_menu_cl.add_child(hint)
+	buy_menu_cl.visible = false
+
+
+func _refresh_buy_menu() -> void:
+	if buy_menu_cl == null:
+		return
+	# Clear and rebuild list
+	for c in buy_menu_cl.get_children():
+		c.queue_free()
+	var bg := ColorRect.new()
+	bg.color = Color(0.02, 0.05, 0.10, 0.94)
+	bg.size = Vector2(540, 380)
+	bg.position = Vector2(370, 170)
+	buy_menu_cl.add_child(bg)
+	var title := Label.new()
+	title.text = "STORE"
+	title.position = Vector2(580, 185)
+	title.add_theme_font_size_override("font_size", 32)
+	title.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
+	buy_menu_cl.add_child(title)
+	var info := Label.new()
+	info.text = "Your money: $" + str(sim_budget) + "  Health: " + str(player_health) + "/" + str(player_max_health) + "  Ammo: " + str(ammo) + "/" + str(max_ammo)
+	info.position = Vector2(380, 230)
+	info.add_theme_font_size_override("font_size", 16)
+	info.add_theme_color_override("font_color", Color(0.9, 0.95, 1.0))
+	buy_menu_cl.add_child(info)
+	# 1: Health Pack $200
+	var h1 := Label.new()
+	h1.text = "[1] Health Pack (+50 HP) - $200"
+	h1.position = Vector2(390, 270)
+	h1.add_theme_font_size_override("font_size", 18)
+	h1.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6) if sim_budget >= 200 else Color(0.5, 0.5, 0.5))
+	buy_menu_cl.add_child(h1)
+	var h2 := Label.new()
+	h2.text = "[2] Ammo Crate (+30 bullets) - $150"
+	h2.position = Vector2(390, 305)
+	h2.add_theme_font_size_override("font_size", 18)
+	h2.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6) if sim_budget >= 150 else Color(0.5, 0.5, 0.5))
+	buy_menu_cl.add_child(h2)
+	var h3 := Label.new()
+	h3.text = "[3] Bail Bond (wanted -2) - $500"
+	h3.position = Vector2(390, 340)
+	h3.add_theme_font_size_override("font_size", 18)
+	h3.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6) if sim_budget >= 500 else Color(0.5, 0.5, 0.5))
+	buy_menu_cl.add_child(h3)
+	var h4 := Label.new()
+	h4.text = "[4] Smog Upgrade (car 2x faster) - $1000"
+	h4.position = Vector2(390, 375)
+	h4.add_theme_font_size_override("font_size", 18)
+	h4.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6) if sim_budget >= 1000 else Color(0.5, 0.5, 0.5))
+	buy_menu_cl.add_child(h4)
+	var h5 := Label.new()
+	h5.text = "[0] Close Store"
+	h5.position = Vector2(390, 410)
+	h5.add_theme_font_size_override("font_size", 18)
+	h5.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	buy_menu_cl.add_child(h5)
+
+
+func _toggle_buy_menu() -> void:
+	if buy_menu_open:
+		buy_menu_open = false
+		if buy_menu_cl:
+			buy_menu_cl.visible = false
+	else:
+		buy_menu_open = true
+		if buy_menu_cl == null:
+			_build_buy_menu()
+		buy_menu_cl.visible = true
+		_refresh_buy_menu()
+
+
+func _buy_item(idx: int) -> void:
+	if idx == 0:
+		_toggle_buy_menu()
+		return
+	if idx == 1:
+		if sim_budget >= 200:
+			sim_budget -= 200
+			player_health = min(player_max_health, player_health + 50)
+			_announce("HEALTH PACK (+50 HP)", Color(0.4, 1.0, 0.4))
+	elif idx == 2:
+		if sim_budget >= 150:
+			sim_budget -= 150
+			ammo = min(max_ammo, ammo + 30)
+			_announce("AMMO CRATE (+30)", Color(1.0, 0.9, 0.4))
+	elif idx == 3:
+		if sim_budget >= 500:
+			sim_budget -= 500
+			wanted_level = max(0, wanted_level - 2)
+			_announce("BAIL BOND POSTED", Color(0.4, 0.8, 1.0))
+	elif idx == 4:
+		if sim_budget >= 1000:
+			sim_budget -= 1000
+			current_vehicle_speed = max(current_vehicle_speed, 22.0)
+			_announce("SMOG TUNING DONE", Color(1.0, 0.7, 0.3))
+	_refresh_buy_menu()
 
 
 func _draw_wanted_meter() -> void:
@@ -1749,6 +1975,14 @@ func _play_mission_complete_sound() -> void:
 
 
 func _try_shoot() -> void:
+	if ammo <= 0:
+		_announce("OUT OF AMMO - Press B to buy", Color(1, 0.4, 0.4))
+		_play_beep(110, 0.1, 0.2)
+		return
+	if Time.get_ticks_msec() - last_shot_time < 200.0:
+		return
+	last_shot_time = Time.get_ticks_msec()
+	ammo -= 1
 	if bullet_cooldown > 0.0:
 		return
 	# Create a bullet mesh
@@ -1926,6 +2160,115 @@ func _spawn_police_unit() -> void:
 	})
 
 
+
+
+
+
+func _show_game_complete() -> void:
+	game_complete = true
+	final_score = sim_budget + (sim_population * 10) + (stats_money_earned * 2) - (stats_npcs_killed * 100) - (total_deaths * 200)
+	if final_score > 50000:
+		final_rank = "LEGENDARY CRIMINAL"
+	elif final_score > 20000:
+		final_rank = "MASTER SYNDICATE BOSS"
+	elif final_score > 10000:
+		final_rank = "GANG LEADER"
+	elif final_score > 5000:
+		final_rank = "THIEF"
+	elif final_score > 1000:
+		final_rank = "PETTY CROOK"
+	else:
+		final_rank = "TOURIST"
+	final_cl = CanvasLayer.new()
+	final_cl.layer = 12
+	add_child(final_cl)
+	var bg := ColorRect.new()
+	bg.color = Color(0.02, 0.02, 0.05, 0.95)
+	bg.size = Vector2(1280, 720)
+	final_cl.add_child(bg)
+	var t := Label.new()
+	t.text = "GAME COMPLETE"
+	t.position = Vector2(440, 100)
+	t.add_theme_font_size_override("font_size", 64)
+	t.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
+	final_cl.add_child(t)
+	var r := Label.new()
+	r.text = "Rank: " + final_rank
+	r.position = Vector2(500, 200)
+	r.add_theme_font_size_override("font_size", 32)
+	r.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6))
+	final_cl.add_child(r)
+	var s := Label.new()
+	s.text = "Final Score: " + str(final_score)
+	s.position = Vector2(480, 260)
+	s.add_theme_font_size_override("font_size", 28)
+	s.add_theme_color_override("font_color", Color(0.95, 0.95, 1.0))
+	final_cl.add_child(s)
+	var st := Label.new()
+	st.position = Vector2(280, 340)
+	st.add_theme_font_size_override("font_size", 18)
+	st.add_theme_color_override("font_color", Color(0.9, 0.95, 1.0))
+	st.text = """FINAL STATS
+====================
+Money in wallet:           $""" + str(sim_budget) + """
+Population:                """ + str(sim_population) + """
+Day count:                 """ + str(sim_day_count) + """
+Total earned:              $""" + str(stats_money_earned) + """
+Missions completed:        """ + str(completed_missions.size()) + """
+Missions failed:           """ + str(stats_missions_failed) + """
+NPCs killed:               """ + str(stats_npcs_killed) + """
+Cars smashed:              """ + str(stats_cars_smashed) + """
+Bullets fired:             """ + str(stats_bullets_fired) + """
+Distance walked:           """ + str(int(stats_distance_walked)) + """m
+Times busted/killed:       """ + str(total_deaths) + """
+Total play time:           """ + str(int(total_play_time / 60.0)) + """m """ + str(int(total_play_time) % 60) + """s
+
+Press R to restart, or just keep playing."""
+	final_cl.add_child(st)
+
+
+func _restart_game() -> void:
+	# Reset all sim state
+	sim_budget = 20000
+	sim_population = 1250
+	sim_day_count = 0
+	sim_residential_demand = 50.0
+	sim_commercial_demand = 50.0
+	sim_industrial_demand = 50.0
+	sim_income_today = 0
+	sim_expenses_today = 0
+	wanted_level = 0
+	wanted_timer = 0.0
+	stats_npcs_killed = 0
+	stats_cars_smashed = 0
+	stats_money_earned = 0
+	stats_bullets_fired = 0
+	stats_distance_walked = 0.0
+	stats_missions_failed = 0
+	total_deaths = 0
+	total_play_time = 0.0
+	player_health = player_max_health
+	ammo = max_ammo
+	completed_missions.clear()
+	game_complete = false
+	final_rank = ""
+	final_score = 0
+	if final_cl:
+		final_cl.queue_free()
+		final_cl = null
+	# Reset missions
+	_setup_missions()
+	# Reset player position
+	player_pos = Vector3(_wx(8 * CELL), 0.7, _wz(8 * CELL))
+	if player:
+		player.position = player_pos
+	# Reset bullets/pickups
+	bullets.clear()
+	for p in pickups:
+		if p.mesh:
+			p.mesh.queue_free()
+	pickups.clear()
+	_announce("NEW GAME STARTED", Color(0.4, 1.0, 0.4))
 
 func _build_main_menu() -> void:
 	menu_cl = CanvasLayer.new()
