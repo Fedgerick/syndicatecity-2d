@@ -1373,7 +1373,19 @@ func _update_minimap() -> void:
 		var ppx: int = int((po["pos"].x + world_size / 2.0) * scale)
 		var ppy: int = int((po["pos"].z + world_size / 2.0) * scale)
 		draw_dot_on_map(ppx, ppy, Color(0.10, 0.10, 0.95))
-	# Draw player (yellow arrow)
+	# Draw mission target (red square)
+		if current_mission.get("status") == "active" and current_mission.has("target_pos"):
+			var tpos: Vector3 = current_mission["target_pos"]
+			var tx2: int = int((tpos.x + GRID * CELL / 2.0) * 256 / (GRID * CELL))
+			var ty2: int = int((tpos.z + GRID * CELL / 2.0) * 256 / (GRID * CELL))
+			var offsets: Array = [-3, -2, -1, 0, 1, 2, 3]
+			for dx2 in offsets:
+				for dy2 in offsets:
+					var px: int = tx2 + dx2
+					var py: int = ty2 + dy2
+					if px >= 0 and px < 256 and py >= 0 and py < 256:
+						minimap_image.set_pixel(px, py, Color(1, 0, 0))
+		# Draw player (yellow arrow)
 	var plx: int = int((player_pos.x + world_size / 2.0) * scale)
 	var ply: int = int((player_pos.z + world_size / 2.0) * scale)
 	draw_dot_on_map(plx, ply, Color(1, 1, 0))
