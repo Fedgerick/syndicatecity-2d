@@ -1067,6 +1067,10 @@ func _try_enter_building() -> void:
 
 func _enter_building(x: int, z: int) -> void:
 	_play_enter_building_sound()
+	# Check if this is the bank
+	if Vector3(_wx(x * CELL), 0, _wz(z * CELL)).distance_to(bank_pos) < 1.0 and wanted_level < 3:
+		# Walk in clean and you can start the heist
+		_announce("BANK - This is a clean visit. Press H to plan heist.", Color(0.6, 0.9, 0.6))
 	interior_view = true
 	interior_root = Node3D.new()
 	add_child(interior_root)
@@ -1395,7 +1399,11 @@ func _add_wanted(amount: int) -> void:
 func _update_wanted(delta: float) -> void:
 	if wanted_level == 0:
 		return
-	wanted_timer -= delta
+	# Inside building: lose wanted 2x faster
+	var decay: float = delta
+	if interior_view:
+		decay *= 2.0
+	wanted_timer -= decay
 	if wanted_timer <= 0.0:
 		wanted_level = max(0, wanted_level - 1)
 		wanted_timer = 8.0
@@ -2137,6 +2145,9 @@ func _update_bullets(delta: float) -> void:
 		b["mesh"].position = new_pos
 
 
+
+# Bank location (corner of map)
+var bank_pos: Vector3 = Vector3(_wx(20 * CELL), 0.7, _wz(20 * CELL))
 
 func _start_heist() -> void:
 	# Mission 4: bank heist! Steal \$5000, escape police for 30s
