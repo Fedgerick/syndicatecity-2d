@@ -42,7 +42,9 @@ var mission_objective: Label
 var wanted_level: int = 0  # 0..5 stars
 var wanted_timer: float = 0.0
 var police: Array = []  # list of {mesh, pos, target_pos, speed}
-var pickups: Array = []  # {mesh, pos, type: "money"|"health", value}
+var pickups: Array = []
+var bullets: Array = []  # {mesh, pos, vel, ttl}
+var bullet_cooldown: float = 0.0  # {mesh, pos, type: "money"|"health", value}
 var player_health: int = 100
 var audio_on: bool = true
 var vehicle_in: bool = false  # true when player is driving a car
@@ -135,6 +137,7 @@ func _process(delta: float) -> void:
 	_update_wanted(delta)
 	_update_npcs(delta)
 	_update_pickups(delta)
+	_update_bullets(delta)
 	_update_player(delta)
 	_update_vehicle(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
@@ -819,7 +822,7 @@ func _build_hud() -> void:
 	help.position = Vector2(920, 90)
 	help.add_theme_font_size_override("font_size", 14)
 	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
-	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n0/Space = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down\nM = Next mission"
+	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nG = Raise wanted\nJ = Take damage\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down\nM = Next mission"
 	controls_overlay.add_child(help)
 	# Wanted meter overlay (top-left)
 	var wanted_cl := CanvasLayer.new()
@@ -1662,6 +1665,89 @@ func _play_mission_complete_sound() -> void:
 	_play_beep(659.0, 0.15, 0.5)
 	await get_tree().create_timer(0.15).timeout
 	_play_beep(784.0, 0.25, 0.5)
+
+
+
+func _try_shoot() -> void:
+	if bullet_cooldown > 0.0:
+		return
+	# Create a bullet mesh
+	var b := MeshInstance3D.new()
+	var bm := SphereMesh.new()
+	bm.radius = 0.08
+	bm.height = 0.16
+	b.mesh = bm
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1, 0.9, 0.2)
+	mat.emission_enabled = true
+	mat.emission = Color(1, 0.8, 0)
+	mat.emission_energy_multiplier = 2.0
+	b.material_override = mat
+	# Direction: forward based on camera yaw
+	var dir := Vector3(sin(deg_to_rad(cam_yaw)), 0.0, cos(deg_to_rad(cam_yaw)))
+	if vehicle_in and current_vehicle != null:
+		dir = Vector3(sin(current_vehicle_yaw), 0.0, cos(current_vehicle_yaw))
+		b.position = current_vehicle_pos + dir * 2.0 + Vector3(0, 1.0, 0)
+	else:
+		b.position = player_pos + dir * 3.0 + Vector3(0, 1.2, 0)
+	add_child(b)
+	bullets.append({
+		"mesh": b,
+		"pos": b.position,
+		"vel": dir * 50.0,
+		"ttl": 1.5,
+	})
+	bullet_cooldown = 0.18
+	_play_beep(1200.0, 0.05, 0.4)
+
+
+func _update_bullets(delta: float) -> void:
+	bullet_cooldown = max(0.0, bullet_cooldown - delta)
+	for i in range(bullets.size() - 1, -1, -1):
+		var b: Dictionary = bullets[i]
+		b["ttl"] -= delta
+		if b["ttl"] <= 0:
+			b["mesh"].queue_free()
+			bullets.remove_at(i)
+			continue
+		var new_pos: Vector3 = b["pos"] + b["vel"] * delta
+		# Hit NPCs?
+		for n in npcs:
+			var d: float = n["mesh"].position.distance_to(new_pos)
+			if d < 1.0:
+				# Kill NPC
+				n["mesh"].queue_free()
+				npcs.erase(n)
+				sim_budget += 100  # loot
+				_add_wanted(2)
+				b["mesh"].queue_free()
+				bullets.remove_at(i)
+				break
+		# Hit parked cars
+		for v in vehicles:
+			var d2: float = v["pos"].distance_to(new_pos)
+			if d2 < 2.0:
+				# Car explodes: make it smoky + on fire (emission red)
+				v["mesh"].material_override.albedo_color = Color(0.20, 0.10, 0.10)
+				v["mesh"].material_override.emission_enabled = true
+				v["mesh"].material_override.emission = Color(0.6, 0.2, 0.05)
+				v["mesh"].material_override.emission_energy_multiplier = 0.5
+				_add_wanted(2)
+				b["mesh"].queue_free()
+				bullets.remove_at(i)
+				break
+		# Hit police?
+		for po in police:
+			var d3: float = po["pos"].distance_to(new_pos)
+			if d3 < 1.5:
+				_add_wanted(2)
+				# Police car turns smoky
+				po["mesh"].material_override.albedo_color = Color(0.20, 0.10, 0.10)
+				b["mesh"].queue_free()
+				bullets.remove_at(i)
+				break
+		b["pos"] = new_pos
+		b["mesh"].position = new_pos
 
 func save_city() -> void:
 	var data := {
