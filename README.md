@@ -48,6 +48,7 @@ Optional cmdline flags after `--`:
 - **P** — pause / resume
 - **H** — start heist (when near the bank)
 - **+ / -** — speed up / slow down time (0.25x .. 8x)
+- **[** / **]** — lower / raise residential tax rate (0%..20%)
 - **F5** — save city
 - **F9** — load city
 - **R** — restart (or respawn after GAME OVER for $500)

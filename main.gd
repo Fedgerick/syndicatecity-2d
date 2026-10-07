@@ -41,6 +41,7 @@ var powered_cells: Dictionary = {}  # key "%d,%d" -> bool
 # City health warning system: surfaces sim failure modes to the player
 var sim_population_peak: int = 1250
 var sim_budget_deficit_days: int = 0  # consecutive days sim_budget went down
+var sim_high_tax_days: int = 0  # consecutive days tax rate > 15%
 var sim_active_health_warning: String = ""
 var health_warning_label: Label
 var health_warning_bg: ColorRect
@@ -139,6 +140,9 @@ func _ready() -> void:
 			difficulty = 2
 		if arg.begins_with("--simulate-warning="):
 			_pending_warning = arg.substr(19)
+		# Debug: force a starting tax rate to verify the HUD field + warnings
+		if arg.begins_with("--start-tax="):
+			sim_residential_tax_rate = clamp(float(arg.substr(12)) / 100.0, 0.0, 0.20)
 	buildings_root = Node3D.new()
 	add_child(buildings_root)
 	_build_ground()
@@ -181,12 +185,11 @@ func _ready() -> void:
 	for a in args:
 		if a.begins_with("--time="):
 			_t = float(a.substr(7))
-	_apply_time()
-
-	for a in args:
 		if a == "--topdown":
 			cam_topdown = true
-			_refresh_camera()
+	_apply_time()
+	if cam_topdown:
+		_refresh_camera()
 
 	if "--capture" in args:
 		await RenderingServer.frame_post_draw
@@ -242,7 +245,12 @@ func _sim_daily_tick() -> void:
 
 	# Demand: R wants jobs nearby; C wants residents; I wants commercial
 	# SimCity-ish: R demand = 100 - clamp(jobs/2, 0, 100) + residential quality
-	var r_base: float = 100.0 - clamp(c_count * 4.0, 0.0, 80.0) + (sim_budget / 500.0)
+	# High taxes drive residents away (SimCity tax-revolt mechanic)
+	var tax_suppression: float = 0.0
+	if sim_residential_tax_rate > 0.10:
+		# 0% at 10%, 50% penalty at 20% (linear in 10..20% range)
+		tax_suppression = clamp((sim_residential_tax_rate - 0.10) * 500.0, 0.0, 50.0)
+	var r_base: float = 100.0 - clamp(c_count * 4.0, 0.0, 80.0) + (sim_budget / 500.0) - tax_suppression
 	var c_base: float = clamp(r_count * 6.0, 0.0, 100.0) - (i_count * 2.0)
 	var i_base: float = clamp(c_count * 5.0, 0.0, 100.0) - (r_count * 1.0)
 	sim_residential_demand = clamp(r_base, 0.0, 100.0)
@@ -271,6 +279,12 @@ func _sim_daily_tick() -> void:
 	if sim_budget < -2000:
 		sim_residential_demand = max(0.0, sim_residential_demand - 20.0)
 
+	# Track consecutive high-tax days for the TAX REVOLT warning
+	if sim_residential_tax_rate > 0.15:
+		sim_high_tax_days += 1
+	else:
+		sim_high_tax_days = 0
+
 	sim_day_count += 1
 	_update_city_health(r_count, c_count, i_count)
 	_update_power_coverage()
@@ -294,6 +308,11 @@ func _update_city_health(r_count: int, c_count: int, i_count: int) -> void:
 		warning = "BUDGET CRISIS: %d days in deficit! Zone commercial to boost tax income." % sim_budget_deficit_days
 		col = Color(1.0, 0.3, 0.3)
 		duration = 6.0
+	# 1b. Tax revolt: player set tax > 15% for 3+ days
+	elif sim_high_tax_days >= 3 and r_count >= 2:
+		warning = "TAX REVOLT: %d%% rate is unsustainable — residents fleeing. Press [ to lower taxes." % int(sim_residential_tax_rate * 100.0)
+		col = Color(0.95, 0.4, 0.5)
+		duration = 5.5
 	# 2. Population exodus: down >15% from peak AND we have residential
 	elif sim_population_peak > 200 and sim_population < int(sim_population_peak * 0.85):
 		var loss_pct: int = int(100.0 - (float(sim_population) / float(sim_population_peak) * 100.0))
@@ -417,6 +436,16 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_F9: load_city()
 			KEY_PLUS, KEY_KP_ADD: time_speed = clamp(time_speed * 1.5, 0.25, 8.0)
 			KEY_MINUS, KEY_KP_SUBTRACT: time_speed = clamp(time_speed / 1.5, 0.25, 8.0)
+			KEY_BRACKETLEFT:
+				# Lower residential tax rate by 1% (SimCity: [ decreases tax)
+				sim_residential_tax_rate = clamp(sim_residential_tax_rate - 0.01, 0.0, 0.20)
+				_announce("TAX RATE: %d%%" % int(sim_residential_tax_rate * 100.0),
+					Color(0.5, 0.85, 0.5) if sim_residential_tax_rate <= 0.10 else Color(1.0, 0.7, 0.3))
+			KEY_BRACKETRIGHT:
+				# Raise residential tax rate by 1% (SimCity: ] increases tax)
+				sim_residential_tax_rate = clamp(sim_residential_tax_rate + 0.01, 0.0, 0.20)
+				_announce("TAX RATE: %d%%" % int(sim_residential_tax_rate * 100.0),
+					Color(0.5, 0.85, 0.5) if sim_residential_tax_rate <= 0.10 else Color(1.0, 0.7, 0.3))
 			KEY_H: _toggle_controls()
 			KEY_C:
 				cam_thirdperson = true
@@ -541,19 +570,19 @@ func _try_bulldoze(x: int, z: int) -> void:
 			var key = "%d,%d" % [x, z]
 			# Remove from power_plants if it's a power plant
 			if b.z == 3 or b.z == 4:
-				for i in power_plants.size():
-					if power_plants[i] == Vector3i(x, z, b.z):
-						power_plants.remove_at(i)
+				for j in power_plants.size():
+					if power_plants[j] == Vector3i(x, z, b.z):
+						power_plants.remove_at(j)
 						break
 			powered_cells.erase(key)
 			sim_budget += tool_cost_zone / 2
 			placed_buildings.remove_at(i)
 			_refresh_building_at(x, z)
 			return
-	for i in range(custom_roads.size()):
-		if custom_roads[i].x == x and custom_roads[i].y == z:
+	for ridx in range(custom_roads.size()):
+		if custom_roads[ridx].x == x and custom_roads[ridx].y == z:
 			sim_budget += tool_cost_road / 2
-			custom_roads.remove_at(i)
+			custom_roads.remove_at(ridx)
 			for n in get_tree().get_nodes_in_group("custom_road"):
 				n.queue_free()
 			return
@@ -1058,7 +1087,7 @@ func _build_hud() -> void:
 	add_child(controls_overlay)
 	var ctl_bg := ColorRect.new()
 	ctl_bg.color = Color(0, 0, 0, 0.65)
-	ctl_bg.size = Vector2(360, 270)
+	ctl_bg.size = Vector2(360, 285)
 	ctl_bg.position = Vector2(910, 80)
 	controls_overlay.add_child(ctl_bg)
 	controls_label = Label.new()
@@ -1070,7 +1099,7 @@ func _build_hud() -> void:
 	help.position = Vector2(920, 90)
 	help.add_theme_font_size_override("font_size", 14)
 	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
-	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nG = Raise wanted\nJ = Take damage\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down\nM = Next mission"
+	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nG = Raise wanted\nJ = Take damage\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\n[/] = Tax rate (0-20%)\nT = Top-down\nM = Next mission"
 	controls_overlay.add_child(help)
 	# Wanted meter overlay (top-left)
 	var wanted_cl := CanvasLayer.new()
@@ -1176,12 +1205,13 @@ func _refresh_hud() -> void:
 	if hud_label:
 		var hp_str: String = "HP:%d" % player_health
 		var bsign: String = "-" if sim_budget < 0 else ""
-		hud_label.text = "SYNDICATE CITY   %s   Day %d   $%s%s   Pop %d   placed=%d" % [
+		hud_label.text = "SYNDICATE CITY   %s   Day %d   $%s%s   Pop %d   TAX %d%%   placed=%d" % [
 			hp_str,
 			sim_day_count,
 			bsign,
 			_abs_budget_fmt(),
 			sim_population,
+			int(sim_residential_tax_rate * 100.0),
 			placed_buildings.size()]
 	if demand_bars_root != null:
 		_refresh_demand_bars()
@@ -1279,8 +1309,6 @@ func _update_npcs(delta: float) -> void:
 	for n in npcs:
 		# Faster during day, slower at night
 		n["speed"] = lerpf(0.3, 1.0, 1.0 if is_day else 0.2)
-
-	for n in npcs:
 		var t: float = n["t"]
 		var day_mult: float = 1.0 if (_t > 0.3 and _t < 0.75) else 0.35
 		t += delta * n["speed"] * n["dir"] * day_mult / (n["path"][1] - n["path"][0]).length()
@@ -2358,8 +2386,8 @@ func _play_beep(freq: float = 440.0, duration: float = 0.1, vol: float = 0.3) ->
 		playback.push_frame(Vector2(sample, sample))
 	# Fade out
 	var fade_count: int = 1000
-	for i in range(fade_count):
-		var fade: float = 1.0 - (float(i) / fade_count)
+	for fi in range(fade_count):
+		var fade: float = 1.0 - (float(fi) / fade_count)
 		playback.push_frame(Vector2(sin(phase * TAU) * 0.6 * fade, sin(phase * TAU) * 0.6 * fade))
 	player.finished.connect(func(): player.queue_free())
 
@@ -2814,10 +2842,7 @@ func _refresh_event_hud() -> void:
 	for c in event_cl.get_children():
 		if c is Label:
 			(c as Label).text = "EVENT: " + event_active.get("type", "").to_upper().replace("_", " ") + " (" + str(int(event_active.get("life", 0.0))) + "s)"
-	# Update marker color pulse
-	for c in event_cl.get_children():
 		if c is MeshInstance3D:
-			var phase: float = fmod(Time.get_ticks_msec() / 200.0, 2.0)
 			var mat: StandardMaterial3D = (c as MeshInstance3D).material_override
 			if mat:
 				mat.emission_energy_multiplier = 0.6 + 0.4 * abs(sin(Time.get_ticks_msec() * 0.005))
@@ -2854,11 +2879,12 @@ func _current_mission_idx() -> int:
 
 func save_city() -> void:
 	var data := {
-		"version": 3,
+		"version": 4,
 		"t": _t,
 		"sim_day_count": sim_day_count,
 		"sim_budget": sim_budget,
 		"sim_population": sim_population,
+		"sim_residential_tax_rate": sim_residential_tax_rate,
 		"time_speed": time_speed,
 		"wanted_level": wanted_level,
 		"player_pos": [player_pos.x, player_pos.y, player_pos.z],
@@ -2925,6 +2951,7 @@ func load_city() -> void:
 	sim_day_count = int(data.get("sim_day_count", 0))
 	sim_budget = int(data.get("sim_budget", 20000))
 	sim_population = int(data.get("sim_population", 1250))
+	sim_residential_tax_rate = float(data.get("sim_residential_tax_rate", 0.09))
 	time_speed = float(data.get("time_speed", 1.0))
 	wanted_level = int(data.get("wanted_level", 0))
 	if data.has("player_pos") and data.player_pos is Array and data.player_pos.size() == 3:
