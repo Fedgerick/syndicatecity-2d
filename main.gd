@@ -42,6 +42,8 @@ var mission_objective: Label
 var wanted_level: int = 0  # 0..5 stars
 var wanted_timer: float = 0.0
 var police: Array = []  # list of {mesh, pos, target_pos, speed}
+var pickups: Array = []  # {mesh, pos, type: "money"|"health", value}
+var player_health: int = 100
 var vehicle_in: bool = false  # true when player is driving a car
 var current_vehicle: MeshInstance3D
 var current_vehicle_pos: Vector3
@@ -83,6 +85,7 @@ func _ready() -> void:
 	_build_traffic()
 	_build_cars()
 	_build_parked_cars()
+	_build_pickups()
 	_build_npcs()
 	_build_trees()
 	_build_roads()
@@ -130,6 +133,7 @@ func _process(delta: float) -> void:
 	_update_mission(delta)
 	_update_wanted(delta)
 	_update_npcs(delta)
+	_update_pickups(delta)
 	_update_player(delta)
 	_update_vehicle(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
@@ -802,8 +806,8 @@ func _build_hud() -> void:
 	add_child(controls_overlay)
 	var ctl_bg := ColorRect.new()
 	ctl_bg.color = Color(0, 0, 0, 0.65)
-	ctl_bg.size = Vector2(360, 240)
-	ctl_bg.position = Vector2(910, 40)
+	ctl_bg.size = Vector2(360, 270)
+	ctl_bg.position = Vector2(910, 80)
 	controls_overlay.add_child(ctl_bg)
 	controls_label = Label.new()
 	controls_label.position = Vector2(920, 50)
@@ -873,8 +877,10 @@ func _refresh_demand_bars() -> void:
 
 func _refresh_hud() -> void:
 	if hud_label:
+		var hp_str: String = "HP:%d" % player_health
 		var bsign: String = "-" if sim_budget < 0 else ""
-		hud_label.text = "SYNDICATE CITY   Day %d   $%s%s   Pop %d   placed=%d" % [
+		hud_label.text = "SYNDICATE CITY   %s   Day %d   $%s%s   Pop %d   placed=%d" % [
+			hp_str,
 			sim_day_count,
 			bsign,
 			_abs_budget_fmt(),
@@ -1519,6 +1525,62 @@ func _build_parked_cars() -> void:
 			"yaw": yaw,
 			"speed": 0.0,
 		})
+
+
+
+func _build_pickups() -> void:
+	# Scatter money bags and health kits
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42
+	for i in 20:
+		var x: int = rng.randi_range(2, GRID - 2)
+		var z: int = rng.randi_range(2, GRID - 2)
+		if _is_water(x, z):
+			continue
+		var is_money: bool = rng.randf() < 0.7
+		var pickup := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.4, 0.4, 0.4) if is_money else Vector3(0.35, 0.35, 0.35)
+		pickup.mesh = bm
+		var mat := StandardMaterial3D.new()
+		if is_money:
+			mat.albedo_color = Color(0.95, 0.78, 0.15)
+			mat.emission_enabled = true
+			mat.emission = Color(0.5, 0.4, 0.05)
+			mat.emission_energy_multiplier = 0.4
+		else:
+			mat.albedo_color = Color(0.95, 0.20, 0.20)
+			mat.emission_enabled = true
+			mat.emission = Color(0.6, 0.05, 0.05)
+			mat.emission_energy_multiplier = 0.5
+		pickup.material_override = mat
+		pickup.position = Vector3(_wx(x * CELL), 0.2, _wz(z * CELL))
+		add_child(pickup)
+		pickups.append({
+			"mesh": pickup,
+			"pos": pickup.position,
+			"type": "money" if is_money else "health",
+			"value": rng.randi_range(50, 250) if is_money else rng.randi_range(15, 35),
+		})
+
+
+func _update_pickups(delta: float) -> void:
+	# Animate pickup floats
+	var t: float = Time.get_ticks_msec() / 1000.0
+	for p in pickups:
+		p["mesh"].position.y = 0.2 + sin(t * 2.5 + p["pos"].x) * 0.15
+		p["mesh"].rotation.y = t * 1.2
+	# Check pickup by player
+	for i in range(pickups.size() - 1, -1, -1):
+		var p2: Dictionary = pickups[i]
+		var d: float = player_pos.distance_to(p2["pos"])
+		if d < 1.5:
+			if p2["type"] == "money":
+				sim_budget += p2["value"]
+			else:
+				player_health = min(100, player_health + p2["value"])
+			p2["mesh"].queue_free()
+			pickups.remove_at(i)
 
 func save_city() -> void:
 	var data := {
