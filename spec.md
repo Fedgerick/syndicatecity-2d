@@ -579,6 +579,7 @@ All audio is procedural (sine-wave beeps via `AudioStreamGenerator`):
 
 ### v8 (next session)
 
+- [x] **Neon storefront glow / night window emission** — commercial zones glow magenta/cyan at night, lamps flicker warmly.
 - [ ] Helicopter vehicle (spawn on helipad, fly with WASD + Space/Shift)
 - [ ] NPC dialogue (T key near pedestrian, dialogue trees)
 - [ ] Side quests from NPCs (3-5 chain quests)

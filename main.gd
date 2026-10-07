@@ -599,6 +599,7 @@ func _place_building(x: int, z: int, color_idx: int, d: int = 1) -> void:
 	var h: float = _density_height(d)
 	var b := _make_box(Vector3(CELL * 0.8, h, CELL * 0.8),
 		Vector3(_wx(x * CELL), h * 0.5, _wz(z * CELL)), _zone_color(color_idx))
+	b.set_meta("color_idx", color_idx)
 	buildings_root.add_child(b)
 	placed_buildings.append(Vector3i(x, z, color_idx))
 	building_meshes.append(b)
@@ -652,6 +653,9 @@ func _build_light_env() -> void:
 	env = Environment.new()
 	env.background_mode = Environment.BG_SKY
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	var sky := Sky.new()
+	sky.sky_material = ProceduralSkyMaterial.new()
+	env.sky = sky
 	world_env.environment = env
 	add_child(world_env)
 
@@ -669,21 +673,37 @@ func _apply_time() -> void:
 	if is_day:
 		env.background_mode = Environment.BG_SKY
 		env.ambient_light_sky_contribution = 1.0
+		if env.sky and env.sky.sky_material:
+			env.sky.sky_material.sky_top_color = Color(0.25, 0.45, 0.95)
+			env.sky.sky_material.sky_horizon_color = Color(0.60, 0.70, 0.95)
 	else:
 		env.background_mode = Environment.BG_COLOR
 		env.background_color = Color(0.05, 0.07, 0.15)
 		env.ambient_light_sky_contribution = 0.3
-	var lamp_e := lerpf(1.5, 0.0, is_day as float)
+	# Lamps: warm pool of light; much stronger at night with slight flicker
+	var lamp_e := lerpf(1.8, 0.0, is_day as float)
+	var flicker: float = 0.98 + randf() * 0.04
 	for lm in lamps:
 		var mat: StandardMaterial3D = lm.material_override
-		mat.emission_energy_multiplier = lamp_e
-	# Building windows glow at night
-	var window_e := lerpf(0.0, 1.2, (not is_day) as float)
+		mat.emission_energy_multiplier = lamp_e * flicker
+	# Building windows / neon storefronts keyed to time-of-day
+	var window_e := lerpf(0.0, 1.4, (not is_day) as float)
+	var neon_e := lerpf(0.0, 2.2, (not is_day) as float)
 	for b in building_meshes:
 		var bmat: StandardMaterial3D = b.material_override
-		bmat.emission_enabled = not is_day
-		if not is_day:
+		var cidx: int = b.get_meta("color_idx") as int
+		bmat.emission_enabled = true
+		if is_day:
+			bmat.emission = Color(0, 0, 0)
+			bmat.emission_energy_multiplier = 0.0
+		elif cidx == 1:
+			# Commercial zones get neon storefront glow (magenta/cyan)
+			bmat.emission = Color(0.9, 0.25, 0.85)
+			bmat.emission_energy_multiplier = neon_e
+		else:
+			# Residential / industrial get warm window light
 			bmat.emission = Color(1.0, 0.85, 0.4)
+			bmat.emission_energy_multiplier = window_e
 
 
 var _camera: Camera3D

@@ -79,7 +79,7 @@ Press **M** to advance between missions. Each mission has its own wanted thresho
 - **NPCs** — 12 pedestrians walking road networks. Faster during day, slower at night.
 - **Vehicles** — 4 parked cars (4 corners) + 12 traffic cars on roads.
 - **Buildings** — 297 zoned cells + 12 rich interiors (apartment / shop / office / vault based on grid hash).
-- **Day/night** — 60-sim-second days. Streetlamps turn on at night.
+- **Day/night** — 60-sim-second days. Streetlamps turn on at night. Commercial zones glow with neon storefront lighting at night; residential/industrial windows emit warm light.
 - **Random events** — every 20 seconds a mugging/car-theft/fire spawns. Get within 4m to resolve for $300.
 - **Store** — Health Pack ($200), Ammo Crate ($150), Bail Bond ($500), Smog Upgrade ($1000).
 - **Stats** — kills, money, distance walked, missions done.
