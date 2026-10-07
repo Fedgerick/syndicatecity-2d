@@ -123,8 +123,6 @@ func _ready() -> void:
 	# Auto-dismiss menu if --start passed on command line
 	var _auto_start: bool = false
 	var _pending_warning: String = ""
-\tprint("DEBUG: ready")
-\tprint("Args:", OS.get_cmdline_user_args())
 	for arg in OS.get_cmdline_user_args():
 		if arg == "--start" or arg == "--play":
 			_auto_start = true
@@ -133,7 +131,7 @@ func _ready() -> void:
 		if arg == "--hard":
 			difficulty = 2
 		if arg.begins_with("--simulate-warning="):
-			_pending_warning = arg.substr(20)
+			_pending_warning = arg.substr(19)
 	buildings_root = Node3D.new()
 	add_child(buildings_root)
 	_build_ground()
@@ -1782,24 +1780,27 @@ func _build_buy_menu() -> void:
 
 
 func _build_health_banner() -> void:
-	# Centered banner just below the HUD top bar — shows sim failure modes
+	# Centered banner — placed between the wanted meter (x=12..232, y=44..80)
+	# and the controls label "Tool: ..." which starts around x=920, y=50.
+	# The free strip is x=240..880, y=44..76 (32px tall).
 	var hcl := CanvasLayer.new()
 	hcl.layer = 6
 	add_child(hcl)
 	health_warning_bg = ColorRect.new()
 	health_warning_bg.color = Color(0.3, 0.1, 0.1, 0.85)
-	health_warning_bg.size = Vector2(820, 40)
-	health_warning_bg.position = Vector2(230, 90)
+	health_warning_bg.size = Vector2(640, 32)
+	health_warning_bg.position = Vector2(240, 44)
 	health_warning_bg.visible = false
 	hcl.add_child(health_warning_bg)
 	health_warning_label = Label.new()
-	health_warning_label.add_theme_font_size_override("font_size", 18)
+	health_warning_label.add_theme_font_size_override("font_size", 14)
 	health_warning_label.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
 	health_warning_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	health_warning_label.add_theme_constant_override("outline_size", 3)
 	health_warning_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	health_warning_label.size = Vector2(820, 40)
-	health_warning_label.position = Vector2(230, 90)
+	health_warning_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	health_warning_label.size = Vector2(640, 32)
+	health_warning_label.position = Vector2(240, 44)
 	health_warning_label.visible = false
 	hcl.add_child(health_warning_label)
 

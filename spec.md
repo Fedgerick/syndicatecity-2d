@@ -580,6 +580,7 @@ All audio is procedural (sine-wave beeps via `AudioStreamGenerator`):
 ### v8 (next session)
 
 - [x] **Neon storefront glow / night window emission** — commercial zones glow magenta/cyan at night, lamps flicker warmly.
+- [x] **City health warning system** — banners surface SimCity failure modes (budget crisis, population exodus, jobs/workers imbalance) so the simulation has a visible feedback loop. `--simulate-warning=budget|exodus|workers|unemployment` debug flag for capture.
 - [ ] Helicopter vehicle (spawn on helipad, fly with WASD + Space/Shift)
 - [ ] NPC dialogue (T key near pedestrian, dialogue trees)
 - [ ] Side quests from NPCs (3-5 chain quests)
