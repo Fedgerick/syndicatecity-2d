@@ -44,6 +44,7 @@ var wanted_timer: float = 0.0
 var police: Array = []  # list of {mesh, pos, target_pos, speed}
 var pickups: Array = []  # {mesh, pos, type: "money"|"health", value}
 var player_health: int = 100
+var audio_on: bool = true
 var vehicle_in: bool = false  # true when player is driving a car
 var current_vehicle: MeshInstance3D
 var current_vehicle_pos: Vector3
@@ -1014,6 +1015,7 @@ func _try_enter_building() -> void:
 
 
 func _enter_building(x: int, z: int) -> void:
+	_play_enter_building_sound()
 	interior_view = true
 	interior_root = Node3D.new()
 	add_child(interior_root)
@@ -1123,6 +1125,7 @@ func _check_vehicle_hits() -> void:
 			var away: Vector3 = (n["mesh"].position - current_vehicle_pos).normalized()
 			n["mesh"].position += away * 4.0
 			_add_wanted(1)
+			_play_crash_sound()
 			# Mark them as hit (visual: turn darker)
 			n["mesh"].material_override.albedo_color = Color(0.4, 0.05, 0.05)
 	# Hit other parked cars (vehicles list)
@@ -1136,6 +1139,7 @@ func _check_vehicle_hits() -> void:
 			v["pos"] += push * 1.5
 			v["mesh"].position = v["pos"]
 			current_vehicle_speed *= 0.4  # bounce
+			_play_crash_sound()
 			_add_wanted(1)
 
 func _update_vehicle(delta: float) -> void:
@@ -1219,6 +1223,8 @@ func _build_police() -> void:
 		})
 
 
+var _police_siren_cooldown: float = 0.0
+
 func _update_police(delta: float) -> void:
 	# Chase player when wanted > 0; otherwise return to station
 	for p in police:
@@ -1249,15 +1255,16 @@ func _update_police(delta: float) -> void:
 			var phase: float = fmod(Time.get_ticks_msec() / 200.0, 2.0)
 			var flash_col: Color = Color(0.9, 0.2, 0.2) if phase < 1.0 else Color(0.2, 0.4, 0.9)
 			p["light"].material_override.emission = flash_col
-		# Catch: end game if police touch player
-		if wanted_level > 0 and dist < 1.5:
+# Police siren cooldown (function level)
+	_police_siren_cooldown -= delta
+	if wanted_level > 0 and _police_siren_cooldown <= 0.0:
+		_play_police_sound()
+		_police_siren_cooldown = 0.6
+# Catch any police that touches player (function level)
+	for po in police:
+		if wanted_level > 0 and po["pos"].distance_to(player_pos) < 1.5:
 			_busted()
-		# Run over NPCs/player with a vehicle
-		if vehicle_in and current_vehicle != null:
-			var dveh: float = p["pos"].distance_to(current_vehicle_pos)
-			if dveh < 1.8:
-				# Player rammed a police car: instant wanted
-				wanted_level = clamp(wanted_level + 1, 0, 5)
+			break
 
 
 func _busted() -> void:
@@ -1447,6 +1454,7 @@ func _update_mission(delta: float) -> void:
 
 
 func _complete_mission() -> void:
+	_play_mission_complete_sound()
 	current_mission["status"] = "complete"
 	var reward: int = current_mission.get("reward", 0)
 	sim_budget += reward
@@ -1577,10 +1585,71 @@ func _update_pickups(delta: float) -> void:
 		if d < 1.5:
 			if p2["type"] == "money":
 				sim_budget += p2["value"]
+				_play_collect_pickup_sound()
 			else:
 				player_health = min(100, player_health + p2["value"])
+				_play_collect_pickup_sound()
 			p2["mesh"].queue_free()
 			pickups.remove_at(i)
+
+
+
+func _play_beep(freq: float = 440.0, duration: float = 0.1, vol: float = 0.3) -> void:
+	if not audio_on:
+		return
+	# Generate a simple sine wave beep using AudioStreamGenerator
+	var player := AudioStreamPlayer.new()
+	add_child(player)
+	var gen_stream := AudioStreamGenerator.new()
+	gen_stream.mix_rate = 22050.0
+	gen_stream.buffer_length = 0.5
+	player.stream = gen_stream
+	player.volume_db = linear_to_db(vol)
+	player.play()
+	var playback := player.get_stream_playback() as AudioStreamGeneratorPlayback
+	if playback == null:
+		return
+	var sample_count: int = int(gen_stream.mix_rate * duration)
+	var phase: float = 0.0
+	var step: float = freq / gen_stream.mix_rate
+	for i in range(sample_count):
+		var sample: float = sin(phase * TAU) * 0.6
+		phase += step
+		playback.push_frame(Vector2(sample, sample))
+	# Fade out
+	var fade_count: int = 1000
+	for i in range(fade_count):
+		var fade: float = 1.0 - (float(i) / fade_count)
+		playback.push_frame(Vector2(sin(phase * TAU) * 0.6 * fade, sin(phase * TAU) * 0.6 * fade))
+	player.finished.connect(func(): player.queue_free())
+
+
+func _play_collect_pickup_sound() -> void:
+	_play_beep(880.0, 0.08, 0.4)
+
+
+func _play_crash_sound() -> void:
+	_play_beep(180.0, 0.15, 0.5)
+
+
+func _play_enter_building_sound() -> void:
+	_play_beep(660.0, 0.06, 0.3)
+
+
+func _play_police_sound() -> void:
+	# Two-tone police siren
+	_play_beep(700.0, 0.3, 0.4)
+	await get_tree().create_timer(0.3).timeout
+	_play_beep(950.0, 0.3, 0.4)
+
+
+func _play_mission_complete_sound() -> void:
+	# Three-tone success
+	_play_beep(523.0, 0.15, 0.5)
+	await get_tree().create_timer(0.15).timeout
+	_play_beep(659.0, 0.15, 0.5)
+	await get_tree().create_timer(0.15).timeout
+	_play_beep(784.0, 0.25, 0.5)
 
 func save_city() -> void:
 	var data := {
