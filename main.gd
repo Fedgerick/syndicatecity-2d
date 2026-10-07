@@ -72,7 +72,10 @@ var player_invulnerable: float = 0.0  # seconds of i-frames after respawn
 var announcement_label: Label  # big yellow banner for unlocks, mission start, etc.
 var announcement_timer: float = 0.0
 var audio_on: bool = true
-var difficulty: int = 1  # 0=easy, 1=normal, 2=hard
+var difficulty: int = 1
+var paused: bool = false
+var damage_flash: float = 0.0
+var damage_flash_cl: CanvasLayer  # 0=easy, 1=normal, 2=hard
 var easy_mode: bool = false
 var menu_cl: CanvasLayer
 var menu_label: Label
@@ -1403,7 +1406,8 @@ func _update_police(delta: float) -> void:
 					_announce("HIT BY POLICE (-" + str(dmg) + " HP)", Color(1, 0.3, 0.3))
 					_play_beep(110, 0.15, 0.4)
 					player_invulnerable = 0.8
-				# Smash sound
+					damage_flash = 0.2
+					# Smash sound
 				if ramspeed > 14.0:
 					_play_crash_sound()
 				if player_health <= 0:
@@ -1466,6 +1470,23 @@ func _update_wanted(delta: float) -> void:
 	_update_player_status(delta)
 	_update_announcement(delta)
 	_update_context_hint()
+	if damage_flash > 0.0:
+		damage_flash -= delta
+		if damage_flash_cl == null:
+			damage_flash_cl = CanvasLayer.new()
+			damage_flash_cl.layer = 11
+			add_child(damage_flash_cl)
+			var fr := ColorRect.new()
+			fr.color = Color(1, 0, 0, 0.3)
+			fr.size = Vector2(1280, 720)
+			damage_flash_cl.add_child(fr)
+		if damage_flash_cl:
+			var fade: float = clamp(damage_flash / 0.2, 0.0, 1.0)
+			for c in damage_flash_cl.get_children():
+				(c as ColorRect).color.a = 0.3 * fade
+		if damage_flash <= 0.0 and damage_flash_cl:
+			damage_flash_cl.queue_free()
+			damage_flash_cl = null
 	total_play_time += delta
 	_update_random_events(delta)
 	if not game_complete and completed_missions.size() >= missions.size() and missions.size() > 0:
