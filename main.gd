@@ -1525,10 +1525,55 @@ func _update_player_status(delta: float) -> void:
 	# Ammo reload at home? No, buy at store.
 
 
+var game_over: bool = false
+var game_over_cl: CanvasLayer
+
+
+func _show_game_over() -> void:
+	game_over = true
+	game_over_cl = CanvasLayer.new()
+	game_over_cl.layer = 13
+	add_child(game_over_cl)
+	var bg := ColorRect.new()
+	bg.color = Color(0.0, 0.0, 0.0, 0.92)
+	bg.size = Vector2(1280, 720)
+	game_over_cl.add_child(bg)
+	var t := Label.new()
+	t.text = "YOU DIED"
+	t.position = Vector2(440, 200)
+	t.add_theme_font_size_override("font_size", 96)
+	t.add_theme_color_override("font_color", Color(1, 0.2, 0.2))
+	game_over_cl.add_child(t)
+	var s := Label.new()
+	s.text = "Score: $" + str(sim_budget + stats_money_earned)
+	s.position = Vector2(490, 340)
+	s.add_theme_font_size_override("font_size", 32)
+	s.add_theme_color_override("font_color", Color(1, 1, 1))
+	game_over_cl.add_child(s)
+	var d := Label.new()
+	d.text = "Day " + str(sim_day_count) + " - " + str(completed_missions.size()) + " missions done"
+	d.position = Vector2(450, 400)
+	d.add_theme_font_size_override("font_size", 22)
+	d.add_theme_color_override("font_color", Color(0.85, 0.85, 1.0))
+	game_over_cl.add_child(d)
+	var r := Label.new()
+	r.text = "Press R to respawn (-$500) | Esc to quit"
+	r.position = Vector2(400, 480)
+	r.add_theme_font_size_override("font_size", 24)
+	r.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6))
+	game_over_cl.add_child(r)
+
+
 func _on_player_death() -> void:
-	# Player killed by something (police crash, etc). Reset.
 	total_deaths += 1
-	player_health = player_max_health
+	# Easy mode: quick respawn. Normal/Hard: GAME OVER
+	if difficulty == 0:
+		player_health = player_max_health
+		ammo = max_ammo
+		sim_budget = max(sim_budget, 1000)
+	else:
+		_show_game_over()
+		return
 	if difficulty == 0:
 		# Easy mode: restore some inventory
 		ammo = max_ammo
