@@ -33,6 +33,13 @@ var sim_income_today: int = 0
 var sim_expenses_today: int = 0
 var growth_accum: float = 0.0
 var sim_day_accum: float = 0.0  # seconds until next sim day
+# City health warning system: surfaces sim failure modes to the player
+var sim_population_peak: int = 1250
+var sim_budget_deficit_days: int = 0  # consecutive days sim_budget went down
+var sim_active_health_warning: String = ""
+var health_warning_label: Label
+var health_warning_bg: ColorRect
+var health_warning_timer: float = 0.0
 var sim_unlocked: Array[String] = ["Basic Zone"]
 var missions: Array = []  # active missions
 var completed_missions: Array = []
@@ -115,6 +122,9 @@ var controls_label: Label
 func _ready() -> void:
 	# Auto-dismiss menu if --start passed on command line
 	var _auto_start: bool = false
+	var _pending_warning: String = ""
+\tprint("DEBUG: ready")
+\tprint("Args:", OS.get_cmdline_user_args())
 	for arg in OS.get_cmdline_user_args():
 		if arg == "--start" or arg == "--play":
 			_auto_start = true
@@ -122,6 +132,8 @@ func _ready() -> void:
 			difficulty = 0
 		if arg == "--hard":
 			difficulty = 2
+		if arg.begins_with("--simulate-warning="):
+			_pending_warning = arg.substr(20)
 	buildings_root = Node3D.new()
 	add_child(buildings_root)
 	_build_ground()
@@ -155,6 +167,8 @@ func _ready() -> void:
 	bullet_template.bottom_radius = 0.06
 	bullet_template.height = 0.4
 	_build_hud()
+	if _pending_warning != "":
+		_apply_debug_warning(_pending_warning)
 	demand_bars_root = Node.new()
 	hud_label.add_child(demand_bars_root)
 
@@ -194,6 +208,7 @@ func _process(delta: float) -> void:
 	_update_bullets(delta)
 	_update_player(delta)
 	_update_vehicle(delta)
+	_update_health_banner(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
 	growth_accum += delta
 	if growth_accum > 0.5:
@@ -252,6 +267,105 @@ func _sim_daily_tick() -> void:
 		sim_residential_demand = max(0.0, sim_residential_demand - 20.0)
 
 	sim_day_count += 1
+	_update_city_health(r_count, c_count, i_count)
+
+
+func _update_city_health(r_count: int, c_count: int, i_count: int) -> void:
+	# Track population peak so we can warn when it drops
+	if sim_population > sim_population_peak:
+		sim_population_peak = sim_population
+	# Track consecutive deficit days
+	if (sim_income_today - sim_expenses_today) < 0:
+		sim_budget_deficit_days += 1
+	else:
+		sim_budget_deficit_days = 0
+	# Pick the most severe warning (priority: budget > population > jobs > workers)
+	var warning: String = ""
+	var col: Color = Color(1, 0.85, 0.2)
+	var duration: float = 4.0
+	# 1. Budget crisis: 3+ days of negative net income
+	if sim_budget_deficit_days >= 3:
+		warning = "BUDGET CRISIS: %d days in deficit! Zone commercial to boost tax income." % sim_budget_deficit_days
+		col = Color(1.0, 0.3, 0.3)
+		duration = 6.0
+	# 2. Population exodus: down >15% from peak AND we have residential
+	elif sim_population_peak > 200 and sim_population < int(sim_population_peak * 0.85):
+		var loss_pct: int = int(100.0 - (float(sim_population) / float(sim_population_peak) * 100.0))
+		warning = "POPULATION EXODUS: -%d%% from peak (%d/%d). Build more residential or lower taxes." % [loss_pct, sim_population, sim_population_peak]
+		col = Color(1.0, 0.6, 0.2)
+		duration = 5.0
+	# 3. Jobs without workers: lots of industrial, no residential nearby
+	elif i_count > 4 and r_count < 2 and i_count > r_count * 2:
+		warning = "NEED WORKERS: %d industrial jobs but only %d residential — people are commuting from out of town." % [i_count, r_count]
+		col = Color(0.9, 0.8, 0.3)
+		duration = 4.5
+	# 4. Workers without jobs: residential but no commerce/industry
+	elif r_count > 5 and c_count < 2 and i_count < 2:
+		warning = "UNEMPLOYMENT: %d residential but only %d shops/factories. Zone commercial or industrial to hire them." % [r_count, c_count + i_count]
+		col = Color(0.7, 0.8, 1.0)
+		duration = 4.5
+	# Only fire warning if state changed (so we don't spam the banner every day)
+	if warning != "" and warning != sim_active_health_warning:
+		_show_health_banner(warning, col, duration)
+		sim_active_health_warning = warning
+	elif warning == "":
+		sim_active_health_warning = ""
+
+
+func _show_health_banner(text: String, col: Color, duration: float) -> void:
+	if health_warning_label == null:
+		return
+	health_warning_label.text = text
+	health_warning_label.add_theme_color_override("font_color", col)
+	if health_warning_bg:
+		health_warning_bg.color = Color(col.r * 0.3, col.g * 0.3, col.b * 0.3, 0.85)
+	health_warning_label.modulate = Color(1, 1, 1, 1)
+	health_warning_label.visible = true
+	if health_warning_bg:
+		health_warning_bg.visible = true
+	health_warning_timer = duration
+
+
+func _apply_debug_warning(wname: String) -> void:
+	# Debug hook for the cron capture: force a known health warning
+	# to verify the banner renders. Used via --simulate-warning=name.
+	# Recognized names: budget, exodus, workers, unemployment.
+	match wname:
+		"budget":
+			sim_budget = -5000
+			sim_budget_deficit_days = 4
+			_show_health_banner(
+				"BUDGET CRISIS: 4 days in deficit! Zone commercial to boost tax income.",
+				Color(1.0, 0.3, 0.3), 30.0)
+		"exodus":
+			sim_population_peak = 5000
+			sim_population = 3000
+			_show_health_banner(
+				"POPULATION EXODUS: -40% from peak (3000/5000). Build more residential or lower taxes.",
+				Color(1.0, 0.6, 0.2), 30.0)
+		"workers":
+			_show_health_banner(
+				"NEED WORKERS: 8 industrial jobs but only 2 residential — people are commuting from out of town.",
+				Color(0.9, 0.8, 0.3), 30.0)
+		"unemployment":
+			_show_health_banner(
+				"UNEMPLOYMENT: 12 residential but only 1 shops/factories. Zone commercial or industrial to hire them.",
+				Color(0.7, 0.8, 1.0), 30.0)
+
+
+func _update_health_banner(delta: float) -> void:
+	if health_warning_label == null or not health_warning_label.visible:
+		return
+	health_warning_timer -= delta
+	if health_warning_timer <= 0.0:
+		health_warning_label.visible = false
+		if health_warning_bg:
+			health_warning_bg.visible = false
+		return
+	# Fade out the last 1 second
+	if health_warning_timer < 1.0:
+		var a: float = clamp(health_warning_timer, 0.0, 1.0)
+		health_warning_label.modulate = Color(1, 1, 1, a)
 
 
 func _grow_random_cell() -> void:
@@ -878,6 +992,7 @@ func _build_hud() -> void:
 	_refresh_hud()
 	_refresh_wanted_label()
 	_update_minimap()
+	_build_health_banner()
 
 
 
@@ -1664,6 +1779,29 @@ func _build_buy_menu() -> void:
 	hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.8))
 	buy_menu_cl.add_child(hint)
 	buy_menu_cl.visible = false
+
+
+func _build_health_banner() -> void:
+	# Centered banner just below the HUD top bar — shows sim failure modes
+	var hcl := CanvasLayer.new()
+	hcl.layer = 6
+	add_child(hcl)
+	health_warning_bg = ColorRect.new()
+	health_warning_bg.color = Color(0.3, 0.1, 0.1, 0.85)
+	health_warning_bg.size = Vector2(820, 40)
+	health_warning_bg.position = Vector2(230, 90)
+	health_warning_bg.visible = false
+	hcl.add_child(health_warning_bg)
+	health_warning_label = Label.new()
+	health_warning_label.add_theme_font_size_override("font_size", 18)
+	health_warning_label.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
+	health_warning_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	health_warning_label.add_theme_constant_override("outline_size", 3)
+	health_warning_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	health_warning_label.size = Vector2(820, 40)
+	health_warning_label.position = Vector2(230, 90)
+	health_warning_label.visible = false
+	hcl.add_child(health_warning_label)
 
 
 func _refresh_buy_menu() -> void:
