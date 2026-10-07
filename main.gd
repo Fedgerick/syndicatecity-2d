@@ -105,7 +105,6 @@ var current_tool: String = "select"
 var tool_cost_zone: int = 100
 var tool_cost_road: int = 10
 var tool_cost_bulldoze: int = 1
-var sim_speed: float = 1.0
 var controls_overlay: CanvasLayer
 var controls_label: Label
 
@@ -133,6 +132,7 @@ func _ready() -> void:
 	_build_player()
 	_build_minimap()
 	_build_stats_overlay()
+	_build_context_hint()
 	_build_main_menu()
 	_build_buy_menu()
 	bullet_template = CylinderMesh.new()
@@ -278,8 +278,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_T: cam_topdown = not cam_topdown; _refresh_camera()
 			KEY_F5: save_city()
 			KEY_F9: load_city()
-			KEY_PLUS, KEY_KP_ADD: sim_speed = clamp(sim_speed * 1.5, 0.25, 8.0)
-			KEY_MINUS, KEY_KP_SUBTRACT: sim_speed = clamp(sim_speed / 1.5, 0.25, 8.0)
+			KEY_PLUS, KEY_KP_ADD: time_speed = clamp(time_speed * 1.5, 0.25, 8.0)
+			KEY_MINUS, KEY_KP_SUBTRACT: time_speed = clamp(time_speed / 1.5, 0.25, 8.0)
 			KEY_H: _toggle_controls()
 			KEY_C:
 				cam_thirdperson = true
@@ -417,7 +417,7 @@ func _refresh_controls() -> void:
 		"road": tool_name = "ROAD $10"
 		"bulldoze": tool_name = "BULLDOZE"
 		_: tool_name = "SELECT"
-	controls_label.text = "Tool: %s   Speed: %.2fx   [H] Help" % [tool_name, sim_speed]
+	controls_label.text = "Tool: %s   Speed: %.2fx   [H] Help" % [tool_name, time_speed]
 
 
 
@@ -805,6 +805,7 @@ func _refresh_camera() -> void:
 
 
 var hud_label: Label
+var context_hint_label: Label
 var minimap_image: Image
 var minimap_texture: ImageTexture
 var minimap_sprite: Sprite2D
@@ -919,6 +920,51 @@ func _refresh_demand_bars() -> void:
 		fill.position = Vector2(base_x + 16, base_y + i * (bar_h + 2))
 		fill.size = Vector2(bar_w * (vals[i] / 100.0), bar_h)
 		demand_bars_root.add_child(fill)
+
+func _build_context_hint() -> void:
+	var cl := CanvasLayer.new()
+	cl.layer = 4
+	add_child(cl)
+	context_hint_label = Label.new()
+	context_hint_label.add_theme_font_size_override("font_size", 18)
+	context_hint_label.add_theme_color_override("font_color", Color(1, 1, 1))
+	context_hint_label.position = Vector2(10, 10)
+	cl.add_child(context_hint_label)
+
+
+func _update_context_hint() -> void:
+	if context_hint_label == null:
+		return
+	var hint: String = ""
+	if menu_cl:
+		hint = "Press 1=EASY, 2=NORMAL, 3=HARD, then ENTER to start"
+	elif current_mission.is_empty() and not game_complete:
+		hint = "WASD to walk. Place buildings with 1/2/3. Pick a mission: press M."
+	elif game_complete:
+		hint = "GAME COMPLETE. Press R to restart, or keep playing."
+	elif not current_mission.is_empty():
+		hint = "[MISSION] " + current_mission.get("title", "?") + ": " + current_mission.get("objective", "")
+	if interior_view:
+		hint += "  | Press ESC to leave building"
+	if vehicle_in:
+		hint += "  | Driving. F to exit."
+	if wanted_level >= 3:
+		hint += "  | WANTED " + str(wanted_level) + " STARS - run!"
+	if not event_active.is_empty():
+		hint += "  | EVENT: walk to red marker (" + str(int(event_active.get("life", 0))) + "s)"
+	if buy_menu_open:
+		hint = "STORE - press 1/2/3/4 to buy, 0 to close"
+	context_hint_label.text = hint
+	# Color changes with state
+	var col: Color = Color(1, 1, 1)
+	if wanted_level >= 3:
+		col = Color(1, 0.5, 0.4)
+	elif wanted_level > 0:
+		col = Color(1, 0.8, 0.4)
+	elif not current_mission.is_empty():
+		col = Color(1, 0.95, 0.4)
+	context_hint_label.add_theme_color_override("font_color", col)
+
 
 func _refresh_hud() -> void:
 	if hud_label:
@@ -1419,6 +1465,7 @@ func _update_wanted(delta: float) -> void:
 			_next_mission()
 	_update_player_status(delta)
 	_update_announcement(delta)
+	_update_context_hint()
 	total_play_time += delta
 	_update_random_events(delta)
 	if not game_complete and completed_missions.size() >= missions.size() and missions.size() > 0:
@@ -2502,18 +2549,38 @@ func _clear_event() -> void:
 			c.queue_free()
 	event_timer = 0.0
 
+func _current_mission_idx() -> int:
+	for i in range(missions.size()):
+		if missions[i].get("id") == current_mission.get("id"):
+			return i
+	return 0
+
+
 func save_city() -> void:
 	var data := {
-		"version": 2,
+		"version": 3,
 		"t": _t,
 		"sim_day_count": sim_day_count,
 		"sim_budget": sim_budget,
 		"sim_population": sim_population,
-		"sim_speed": sim_speed,
+		"time_speed": time_speed,
 		"wanted_level": wanted_level,
 		"player_pos": [player_pos.x, player_pos.y, player_pos.z],
 		"buildings": [],
 		"custom_roads": [],
+		"stats_npcs_killed": stats_npcs_killed,
+		"stats_cars_smashed": stats_cars_smashed,
+		"stats_money_earned": stats_money_earned,
+		"stats_bullets_fired": stats_bullets_fired,
+		"stats_distance_walked": stats_distance_walked,
+		"stats_missions_failed": stats_missions_failed,
+		"completed_missions": completed_missions,
+		"current_mission_idx": _current_mission_idx(),
+		"player_health": player_health,
+		"ammo": ammo,
+		"difficulty": difficulty,
+		"total_play_time": total_play_time,
+		"total_deaths": total_deaths,
 	}
 	for i in placed_buildings.size():
 		var c: Vector3i = placed_buildings[i]
@@ -2562,7 +2629,7 @@ func load_city() -> void:
 	sim_day_count = int(data.get("sim_day_count", 0))
 	sim_budget = int(data.get("sim_budget", 20000))
 	sim_population = int(data.get("sim_population", 1250))
-	sim_speed = float(data.get("sim_speed", 1.0))
+	time_speed = float(data.get("time_speed", 1.0))
 	wanted_level = int(data.get("wanted_level", 0))
 	if data.has("player_pos") and data.player_pos is Array and data.player_pos.size() == 3:
 		player_pos = Vector3(float(data.player_pos[0]), float(data.player_pos[1]), float(data.player_pos[2]))
@@ -2570,6 +2637,21 @@ func load_city() -> void:
 			player.position = player_pos
 	_t = float(data.get("t", 0.5))
 	_apply_time()
+	stats_npcs_killed = int(data.get("stats_npcs_killed", 0))
+	stats_cars_smashed = int(data.get("stats_cars_smashed", 0))
+	stats_money_earned = int(data.get("stats_money_earned", 0))
+	stats_bullets_fired = int(data.get("stats_bullets_fired", 0))
+	stats_distance_walked = float(data.get("stats_distance_walked", 0.0))
+	stats_missions_failed = int(data.get("stats_missions_failed", 0))
+	player_health = int(data.get("player_health", player_max_health))
+	ammo = int(data.get("ammo", max_ammo))
+	difficulty = int(data.get("difficulty", 1))
+	total_play_time = float(data.get("total_play_time", 0.0))
+	total_deaths = int(data.get("total_deaths", 0))
+	completed_missions = data.get("completed_missions", [])
+	var cm_idx: int = int(data.get("current_mission_idx", 0))
+	if cm_idx >= 0 and cm_idx < missions.size():
+		current_mission = missions[cm_idx]
 	print("LOAD: %d buildings, $", placed_buildings.size(), sim_budget, " day ", sim_day_count)
 var cars: Array[MeshInstance3D] = []
 var npcs: Array = []  # each: {mesh, path, idx, t}
