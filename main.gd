@@ -52,6 +52,8 @@ var bullets: Array = []  # {mesh, pos, vel, ttl}
 var bullet_cooldown: float = 0.0  # {mesh, pos, type: "money"|"health", value}
 var player_health: int = 100
 var audio_on: bool = true
+var menu_cl: CanvasLayer
+var menu_label: Label
 var vehicle_in: bool = false  # true when player is driving a car
 var current_vehicle: MeshInstance3D
 var current_vehicle_pos: Vector3
@@ -107,6 +109,7 @@ func _ready() -> void:
 	_build_player()
 	_build_minimap()
 	_build_stats_overlay()
+	_build_main_menu()
 	_build_hud()
 	demand_bars_root = Node.new()
 	hud_label.add_child(demand_bars_root)
@@ -1921,6 +1924,57 @@ func _spawn_police_unit() -> void:
 		"yaw": 0.0,
 		"speed": 0.0,
 	})
+
+
+
+func _build_main_menu() -> void:
+	menu_cl = CanvasLayer.new()
+	menu_cl.layer = 10
+	add_child(menu_cl)
+	var bg := ColorRect.new()
+	bg.color = Color(0.02, 0.02, 0.08, 0.92)
+	bg.size = Vector2(1280, 720)
+	menu_cl.add_child(bg)
+	# Title
+	var title := Label.new()
+	title.text = "SYNDICATE CITY"
+	title.position = Vector2(380, 60)
+	title.add_theme_font_size_override("font_size", 72)
+	title.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
+	menu_cl.add_child(title)
+	var subtitle := Label.new()
+	subtitle.text = "SimCity + GTA"
+	subtitle.position = Vector2(540, 160)
+	subtitle.add_theme_font_size_override("font_size", 24)
+	subtitle.add_theme_color_override("font_color", Color(0.7, 0.7, 0.8))
+	menu_cl.add_child(subtitle)
+	# Instructions
+	var inst := Label.new()
+	inst.position = Vector2(100, 230)
+	inst.add_theme_font_size_override("font_size", 18)
+	inst.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
+	inst.text = """Build your city. Walk its roads. Commit crimes. Make the cash.
+
+1/2/3 zones  4 roads  5 bulldoze  Click to apply
+WASD walk  F enter car  Space shoot  E enter building
++/- sim speed  T top-down  C/V camera
+M next mission  H hide help  TAB stats  F5/F9 save/load
+
+Press ENTER or click to start."""
+	menu_cl.add_child(inst)
+	# Footer
+	var footer := Label.new()
+	footer.text = "Press ENTER or click to start"
+	footer.position = Vector2(440, 670)
+	footer.add_theme_font_size_override("font_size", 22)
+	footer.add_theme_color_override("font_color", Color(0.6, 0.9, 0.6))
+	menu_cl.add_child(footer)
+
+
+func _dismiss_menu() -> void:
+	if menu_cl:
+		menu_cl.queue_free()
+		menu_cl = null
 
 func save_city() -> void:
 	var data := {
