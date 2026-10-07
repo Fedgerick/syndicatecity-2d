@@ -113,6 +113,15 @@ var controls_label: Label
 
 
 func _ready() -> void:
+	# Auto-dismiss menu if --start passed on command line
+	var _auto_start: bool = false
+	for arg in OS.get_cmdline_user_args():
+		if arg == "--start" or arg == "--play":
+			_auto_start = true
+		if arg == "--easy":
+			difficulty = 0
+		if arg == "--hard":
+			difficulty = 2
 	buildings_root = Node3D.new()
 	add_child(buildings_root)
 	_build_ground()
@@ -138,6 +147,9 @@ func _ready() -> void:
 	_build_context_hint()
 	_build_main_menu()
 	_build_buy_menu()
+	if _auto_start:
+		print("AUTOSTART: dismissing menu")
+		_dismiss_menu()
 	bullet_template = CylinderMesh.new()
 	bullet_template.top_radius = 0.06
 	bullet_template.bottom_radius = 0.06
@@ -2467,6 +2479,7 @@ func _dismiss_menu() -> void:
 	if menu_cl:
 		menu_cl.queue_free()
 		menu_cl = null
+	_refresh_camera()
 
 
 
