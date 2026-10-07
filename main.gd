@@ -33,6 +33,11 @@ var sim_income_today: int = 0
 var sim_expenses_today: int = 0
 var growth_accum: float = 0.0
 var sim_day_accum: float = 0.0  # seconds until next sim day
+# Power system
+const COAL_POWER_RADIUS = 12
+const WIND_POWER_RADIUS = 8
+var power_plants: Array[Vector3i] = []  # (x, z, color_index) where color_index 3=coal, 4=wind
+var powered_cells: Dictionary = {}  # key "%d,%d" -> bool
 # City health warning system: surfaces sim failure modes to the player
 var sim_population_peak: int = 1250
 var sim_budget_deficit_days: int = 0  # consecutive days sim_budget went down
@@ -115,6 +120,8 @@ var current_tool: String = "select"
 var tool_cost_zone: int = 100
 var tool_cost_road: int = 10
 var tool_cost_bulldoze: int = 1
+var tool_cost_coal: int = 250
+var tool_cost_wind: int = 200
 var controls_overlay: CanvasLayer
 var controls_label: Label
 
@@ -266,6 +273,7 @@ func _sim_daily_tick() -> void:
 
 	sim_day_count += 1
 	_update_city_health(r_count, c_count, i_count)
+	_update_power_coverage()
 
 
 func _update_city_health(r_count: int, c_count: int, i_count: int) -> void:
@@ -401,6 +409,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_3: current_tool = "zone_ind"
 			KEY_4: current_tool = "road"
 			KEY_5: current_tool = "bulldoze"
+			KEY_6: current_tool = "zone_coal"
+			KEY_7: current_tool = "zone_wind"
 			KEY_0, KEY_SPACE: current_tool = "select"
 			KEY_T: cam_topdown = not cam_topdown; _refresh_camera()
 			KEY_F5: save_city()
@@ -423,45 +433,74 @@ func _apply_tool_at_hover() -> void:
 	if not _in_bounds(hover_cell.x, hover_cell.y):
 		return
 	match current_tool:
-		"zone_res": _try_zone(hover_cell.x, hover_cell.y, 0)
-		"zone_com": _try_zone(hover_cell.x, hover_cell.y, 1)
-		"zone_ind": _try_zone(hover_cell.x, hover_cell.y, 2)
+		"zone_res": _try_zone(hover_cell.x, hover_cell.y, 0, tool_cost_zone)
+		"zone_com": _try_zone(hover_cell.x, hover_cell.y, 1, tool_cost_zone)
+		"zone_ind": _try_zone(hover_cell.x, hover_cell.y, 2, tool_cost_zone)
 		"road": _try_road(hover_cell.x, hover_cell.y)
 		"bulldoze": _try_bulldoze(hover_cell.x, hover_cell.y)
+		"zone_coal":
+			_try_zone(hover_cell.x, hover_cell.y, 3, tool_cost_coal)
+			_update_power_coverage()
+		"zone_wind":
+			_try_zone(hover_cell.x, hover_cell.y, 4, tool_cost_wind)
+			_update_power_coverage()
 	_refresh_hud()
 	_refresh_wanted_label()
 	_update_minimap()
 
 
-func _try_zone(x: int, z: int, color: int) -> void:
+func _try_zone(x: int, z: int, color: int, cost: int) -> void:
 	if _is_water(x, z):
 		return
-	if sim_budget < tool_cost_zone:
+	if sim_budget < cost:
 		return
 	for i in range(placed_buildings.size()):
 		var b: Vector3i = placed_buildings[i]
 		if b.x == x and b.y == z:
 			var cur_density: int = cell_density.get(_bk(x, z), 0)
-			if b.z == color and sim_budget >= tool_cost_zone:
+			if b.z == color and sim_budget >= cost:
 				if cur_density >= 3:
 					return
-				sim_budget -= tool_cost_zone
+				sim_budget -= cost
 				cell_density[_bk(x, z)] = cur_density + 1
 				_refresh_building_at(x, z)
 				return
 			else:
-				if sim_budget >= tool_cost_zone + tool_cost_bulldoze:
+				if sim_budget >= cost + tool_cost_bulldoze:
 					sim_budget -= tool_cost_bulldoze
-					sim_budget -= tool_cost_zone
+					sim_budget -= cost
 					placed_buildings[i] = Vector3i(x, z, color)
+					var key = "%d,%d" % [x, z]
+					powered_cells[key] = false
 					cell_density[_bk(x, z)] = 0
 					_refresh_building_at(x, z)
 					return
 				return
 	if not _is_road_adjacent(x, z):
 		return
-	sim_budget -= tool_cost_zone
+	sim_budget -= cost
 	_place_building(x, z, color, 0)
+
+# Update power coverage for all buildings
+func _update_power_coverage() -> void:
+	var COAL_RADIUS = COAL_POWER_RADIUS
+	var WIND_RADIUS = WIND_POWER_RADIUS
+	for pb in placed_buildings:
+		var key = "%d,%d" % [pb.x, pb.y]
+		var powered = false
+		for pp in power_plants:
+			var dx = pb.x - pp.x
+			var dz = pb.y - pp.z
+			var dist = sqrt(dx*dx + dz*dz)
+			var radius = 0.0
+			if pp.z == 3:  # coal
+				radius = COAL_RADIUS
+			elif pp.z == 4:  # wind
+				radius = WIND_RADIUS
+			if dist <= radius:
+				powered = true
+				break
+		powered_cells[key] = powered
 
 func _bk(x: int, z: int) -> String:
 	return "%d,%d" % [x, z]
@@ -499,6 +538,14 @@ func _try_bulldoze(x: int, z: int) -> void:
 	for i in range(placed_buildings.size()):
 		var b: Vector3i = placed_buildings[i]
 		if b.x == x and b.y == z:
+			var key = "%d,%d" % [x, z]
+			# Remove from power_plants if it's a power plant
+			if b.z == 3 or b.z == 4:
+				for i in power_plants.size():
+					if power_plants[i] == Vector3i(x, z, b.z):
+						power_plants.remove_at(i)
+						break
+			powered_cells.erase(key)
 			sim_budget += tool_cost_zone / 2
 			placed_buildings.remove_at(i)
 			_refresh_building_at(x, z)
@@ -543,6 +590,8 @@ func _refresh_controls() -> void:
 		"zone_ind": tool_name = "IND ZONE $100"
 		"road": tool_name = "ROAD $10"
 		"bulldoze": tool_name = "BULLDOZE"
+		"zone_coal": tool_name = "COAL PLANT $250"
+		"zone_wind": tool_name = "WIND PLANT $200"
 		_: tool_name = "SELECT"
 	controls_label.text = "Tool: %s   Speed: %.2fx   [H] Help" % [tool_name, time_speed]
 
@@ -714,6 +763,7 @@ func _place_building(x: int, z: int, color_idx: int, d: int = 1) -> void:
 	b.set_meta("color_idx", color_idx)
 	buildings_root.add_child(b)
 	placed_buildings.append(Vector3i(x, z, color_idx))
+	powered_cells[key] = false
 	building_meshes.append(b)
 
 
@@ -801,21 +851,29 @@ func _apply_time() -> void:
 	# Building windows / neon storefronts keyed to time-of-day
 	var window_e := lerpf(0.0, 1.4, (not is_day) as float)
 	var neon_e := lerpf(0.0, 2.2, (not is_day) as float)
-	for b in building_meshes:
+	for i in building_meshes.size():
+		var b: Node3D = building_meshes[i]
+		var bp: Vector3i = placed_buildings[i]
+		var key = "%d,%d" % [bp.x, bp.y]
+		var powered: bool = powered_cells.get(key, false)
 		var bmat: StandardMaterial3D = b.material_override
 		var cidx: int = b.get_meta("color_idx") as int
 		bmat.emission_enabled = true
 		if is_day:
 			bmat.emission = Color(0, 0, 0)
 			bmat.emission_energy_multiplier = 0.0
-		elif cidx == 1:
-			# Commercial zones get neon storefront glow (magenta/cyan)
-			bmat.emission = Color(0.9, 0.25, 0.85)
-			bmat.emission_energy_multiplier = neon_e
 		else:
-			# Residential / industrial get warm window light
-			bmat.emission = Color(1.0, 0.85, 0.4)
-			bmat.emission_energy_multiplier = window_e
+			if not powered:
+				bmat.emission = Color(0, 0, 0)
+				bmat.emission_energy_multiplier = 0.0
+			elif cidx == 1:
+				# Commercial zones get neon storefront glow (magenta/cyan)
+				bmat.emission = Color(0.9, 0.25, 0.85)
+				bmat.emission_energy_multiplier = neon_e
+			else:
+				# Residential / industrial get warm window light
+				bmat.emission = Color(1.0, 0.85, 0.4)
+				bmat.emission_energy_multiplier = window_e
 
 
 var _camera: Camera3D
@@ -1012,7 +1070,7 @@ func _build_hud() -> void:
 	help.position = Vector2(920, 90)
 	help.add_theme_font_size_override("font_size", 14)
 	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
-	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nG = Raise wanted\nJ = Take damage\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down\nM = Next mission"
+	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nG = Raise wanted\nJ = Take damage\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\nT = Top-down\nM = Next mission"
 	controls_overlay.add_child(help)
 	# Wanted meter overlay (top-left)
 	var wanted_cl := CanvasLayer.new()
