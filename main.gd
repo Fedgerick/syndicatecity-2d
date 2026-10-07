@@ -140,6 +140,7 @@ func _process(delta: float) -> void:
 	_update_cars(delta)
 	_update_police(delta)
 	_update_mission(delta)
+	_update_heist(delta)
 	_update_wanted(delta)
 	_update_npcs(delta)
 	_update_pickups(delta)
@@ -989,9 +990,16 @@ func _build_npcs() -> void:
 
 
 func _update_npcs(delta: float) -> void:
+	# At night, NPCs slow down / head home
+	var is_day: bool = _t > 0.3 and _t < 0.75
+	for n in npcs:
+		# Faster during day, slower at night
+		n["speed"] = lerpf(0.3, 1.0, 1.0 if is_day else 0.2)
+
 	for n in npcs:
 		var t: float = n["t"]
-		t += delta * n["speed"] * n["dir"] / (n["path"][1] - n["path"][0]).length()
+		var day_mult: float = 1.0 if (_t > 0.3 and _t < 0.75) else 0.35
+		t += delta * n["speed"] * n["dir"] * day_mult / (n["path"][1] - n["path"][0]).length()
 		if t > 1.0:
 			t = 1.0
 			n["dir"] = -1
@@ -1821,6 +1829,98 @@ func _update_bullets(delta: float) -> void:
 				break
 		b["pos"] = new_pos
 		b["mesh"].position = new_pos
+
+
+
+func _start_heist() -> void:
+	# Mission 4: bank heist! Steal \$5000, escape police for 30s
+	var m4 := {
+		"id": "the_big_heist",
+		"name": "The Big Heist",
+		"brief": "Rob the bank at the corner of 5th and Main, then escape the police for 30 seconds.",
+		"objective": "Press E at the bank (red building) to rob it",
+		"status": "active",
+		"heist_stage": "rob",  # rob -> escape -> complete
+		"heist_started_at": -1.0,
+		"heist_target": Vector3(_wx(8 * CELL), 0.0, _wz(8 * CELL)),
+		"reward": 5000,
+	}
+	missions.append(m4)
+	current_mission = m4
+	# Spawn a red bank cube
+	var bank := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(6.0, 5.0, 6.0)
+	bank.mesh = bm
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.65, 0.10, 0.10)
+	mat.emission_enabled = true
+	mat.emission = Color(0.3, 0.05, 0.05)
+	mat.emission_energy_multiplier = 0.3
+	bank.material_override = mat
+	bank.position = m4["heist_target"] + Vector3(0, 2.5, 0)
+	bank.name = "Bank"
+	add_child(bank)
+	_refresh_mission_overlay()
+
+
+func _update_heist(delta: float) -> void:
+	if current_mission.get("id") != "the_big_heist":
+		return
+	if current_mission.get("status") != "active":
+		return
+	if current_mission.get("heist_stage") == "rob":
+		# Check player near bank
+		var bank_pos: Vector3 = current_mission["heist_target"]
+		var d: float = player_pos.distance_to(bank_pos)
+		if d < 4.0:
+			# Rob it! +wanted, +5000 cash, mission stage -> escape
+			current_mission["heist_stage"] = "escape"
+			current_mission["objective"] = "Escape the police for 30 seconds!"
+			sim_budget += 5000
+			stats_money_earned += 5000
+			_add_wanted(5)
+			current_mission["heist_started_at"] = sim_day_accum
+			# Police frenzy: more police spawn
+			for i in range(3):
+				_spawn_police_unit()
+	elif current_mission.get("heist_stage") == "escape":
+			# Mission completes after 30 seconds without busted
+			if wanted_level == 0:
+				_complete_mission()
+
+
+func _spawn_police_unit() -> void:
+	var px: int = 0
+	var pz: int = (randi() % 8) * ROAD_EVERY
+	var pos := Vector3(_wx(px * CELL + CELL * 0.5), 0.4, _wz(pz * CELL + CELL * 0.5))
+	var car := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(1.8, 0.7, 3.6)
+	car.mesh = bm
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.05, 0.10, 0.45)
+	car.material_override = mat
+	car.position = pos
+	add_child(car)
+	var lightbar := MeshInstance3D.new()
+	var lm := BoxMesh.new()
+	lm.size = Vector3(1.6, 0.15, 0.4)
+	lightbar.mesh = lm
+	var lmat := StandardMaterial3D.new()
+	lmat.albedo_color = Color(0.10, 0.10, 0.10)
+	lmat.emission_enabled = true
+	lmat.emission = Color(0.9, 0.2, 0.2)
+	lightbar.material_override = lmat
+	lightbar.position = pos + Vector3(0.0, 0.55, 0.0)
+	add_child(lightbar)
+	police.append({
+		"mesh": car,
+		"light": lightbar,
+		"pos": pos,
+		"yaw": 0.0,
+		"speed": 0.0,
+	})
 
 func save_city() -> void:
 	var data := {
