@@ -34,7 +34,12 @@ var growth_accum: float = 0.0
 var sim_day_accum: float = 0.0  # seconds until next sim day
 var sim_unlocked: Array[String] = ["Basic Zone"]
 var missions: Array = []  # active missions
-var completed_missions: Array = []  # strings of completed mission IDs
+var completed_missions: Array = []
+var stats_npcs_killed: int = 0
+var stats_cars_smashed: int = 0
+var stats_money_earned: int = 0
+var stats_bullets_fired: int = 0
+var stats_distance_walked: float = 0.0  # strings of completed mission IDs
 var current_mission: Dictionary = {}
 var mission_overlay: CanvasLayer
 var mission_label: Label
@@ -101,6 +106,7 @@ func _ready() -> void:
 	_build_camera()
 	_build_player()
 	_build_minimap()
+	_build_stats_overlay()
 	_build_hud()
 	demand_bars_root = Node.new()
 	hud_label.add_child(demand_bars_root)
@@ -714,6 +720,8 @@ func _update_player(delta: float) -> void:
 					else:
 						# Blocked both ways, no movement
 						new_pos = player_pos
+			if new_pos.distance_to(player_pos) > 0.001:
+				stats_distance_walked += new_pos.distance_to(player_pos)
 			player_pos = new_pos
 			player.position = player_pos
 			# Face the direction of movement
@@ -1420,6 +1428,48 @@ func _setup_missions() -> void:
 	_build_mission_overlay()
 
 
+func _build_stats_overlay() -> void:
+	var stats_cl := CanvasLayer.new()
+	stats_cl.layer = 6
+	add_child(stats_cl)
+	var sgt_bg := ColorRect.new()
+	sgt_bg.color = Color(0, 0, 0, 0.85)
+	sgt_bg.size = Vector2(420, 280)
+	sgt_bg.position = Vector2(430, 200)
+	stats_cl.add_child(sgt_bg)
+	var sgt_title := Label.new()
+	sgt_title.text = "STATISTICS"
+	sgt_title.position = Vector2(440, 210)
+	sgt_title.add_theme_font_size_override("font_size", 22)
+	sgt_title.add_theme_color_override("font_color", Color(1, 1, 0.4))
+	stats_cl.add_child(sgt_title)
+	var sgt_label := Label.new()
+	sgt_label.name = "StatsLabel"
+	sgt_label.position = Vector2(440, 250)
+	sgt_label.add_theme_font_size_override("font_size", 16)
+	sgt_label.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
+	stats_cl.add_child(sgt_label)
+	stats_cl.visible = false
+
+
+func _refresh_stats_overlay() -> void:
+	var sgt_label := get_node_or_null("StatsLabel")
+	if sgt_label == null:
+		return
+	sgt_label.text = "Day %d\nPopulation: %d\nBudget: $%s\nHP: %d/100\n\nKills: %d\nCars smashed: %d\nMoney earned: $%d\nBullets fired: %d\nDistance walked: %.0f m\nMissions done: %d/3" % [
+		sim_day_count,
+		sim_population,
+		_abs_budget_fmt(),
+		player_health,
+		stats_npcs_killed,
+		stats_cars_smashed,
+		stats_money_earned,
+		stats_bullets_fired,
+		stats_distance_walked,
+		completed_missions.size(),
+	]
+
+
 func _build_mission_overlay() -> void:
 	mission_overlay = CanvasLayer.new()
 	mission_overlay.layer = 4
@@ -1453,7 +1503,10 @@ func _refresh_mission_overlay() -> void:
 		return
 	mission_label.text = "MISSION: %s   [%s]" % [current_mission["name"], current_mission["status"].to_upper()]
 	if current_mission["status"] == "active":
-		mission_objective.text = current_mission["objective"]
+		if current_mission.get("id") == "collect_bonus":
+			mission_objective.text = "%s  [%d/%d]" % [current_mission["objective"], int(current_mission.get("progress", 0)), int(current_mission.get("target_count", 5))]
+		else:
+			mission_objective.text = current_mission["objective"]
 	elif current_mission["status"] == "complete":
 		mission_objective.text = "MISSION COMPLETE! Press M for next mission."
 	elif current_mission["status"] == "failed":
@@ -1491,6 +1544,22 @@ func _next_mission() -> void:
 	}
 	missions.append(m2)
 	current_mission = m2
+	_refresh_mission_overlay()
+
+
+func _next_mission_2() -> void:
+	var m3 := {
+		"id": "collect_bonus",
+		"name": "Tax Bonus",
+		"brief": "Collect 5 money pickups to earn a bonus.",
+		"objective": "Collect 5 money pickups (yellow bags)",
+		"status": "active",
+		"progress": 0,
+		"target_count": 5,
+		"reward": 750,
+	}
+	missions.append(m3)
+	current_mission = m3
 	_refresh_mission_overlay()
 
 
@@ -1698,6 +1767,7 @@ func _try_shoot() -> void:
 		"ttl": 1.5,
 	})
 	bullet_cooldown = 0.18
+	stats_bullets_fired += 1
 	_play_beep(1200.0, 0.05, 0.4)
 
 
@@ -1719,6 +1789,8 @@ func _update_bullets(delta: float) -> void:
 				n["mesh"].queue_free()
 				npcs.erase(n)
 				sim_budget += 100  # loot
+				stats_npcs_killed += 1
+				stats_money_earned += 100
 				_add_wanted(2)
 				b["mesh"].queue_free()
 				bullets.remove_at(i)
@@ -1731,6 +1803,7 @@ func _update_bullets(delta: float) -> void:
 				v["mesh"].material_override.albedo_color = Color(0.20, 0.10, 0.10)
 				v["mesh"].material_override.emission_enabled = true
 				v["mesh"].material_override.emission = Color(0.6, 0.2, 0.05)
+				stats_cars_smashed += 1
 				v["mesh"].material_override.emission_energy_multiplier = 0.5
 				_add_wanted(2)
 				b["mesh"].queue_free()
