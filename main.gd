@@ -1091,11 +1091,40 @@ func _enter_building(x: int, z: int) -> void:
 	interior_root.add_child(_make_box(Vector3(2.5, 0.1, 2.5),
 		Vector3(_wx(x * CELL), 2.6, _wz(z * CELL)),
 		Color(0.40, 0.35, 0.30)))
-	# A few props
-	for px in [-0.7, 0.0, 0.7]:
-		interior_root.add_child(_make_box(Vector3(0.4, 0.4, 0.4),
-			Vector3(_wx(x * CELL) + px, 0.3, _wz(z * CELL) - 0.5),
-			Color(0.55, 0.45, 0.30)))
+	# Richer props based on building type (use color_idx)
+	var color_idx: int = _bk(x, z).length()  # hash by string for some variety
+	var interior_type: int = (x * 7 + z * 13) % 4  # 0=home, 1=shop, 2=office, 3=vault
+	if interior_type == 0:
+		# Apartment: bed, table, couch
+		interior_root.add_child(_make_box(Vector3(1.0, 0.3, 0.6), Vector3(_wx(x * CELL) - 0.6, 0.25, _wz(z * CELL) - 0.6), Color(0.7, 0.4, 0.4)))  # bed
+		interior_root.add_child(_make_box(Vector3(0.4, 0.5, 0.4), Vector3(_wx(x * CELL) + 0.5, 0.3, _wz(z * CELL) - 0.6), Color(0.5, 0.35, 0.2)))  # table
+		interior_root.add_child(_make_box(Vector3(0.8, 0.4, 0.4), Vector3(_wx(x * CELL), 0.25, _wz(z * CELL) + 0.5), Color(0.6, 0.5, 0.4)))  # couch
+	elif interior_type == 1:
+		# Shop: counter, shelves
+		interior_root.add_child(_make_box(Vector3(1.4, 0.7, 0.3), Vector3(_wx(x * CELL), 0.4, _wz(z * CELL) - 0.85), Color(0.6, 0.5, 0.3)))  # counter
+		for sx in [-0.7, 0.0, 0.7]:
+			interior_root.add_child(_make_box(Vector3(0.2, 0.4, 0.5), Vector3(_wx(x * CELL) + sx - 0.3, 0.3, _wz(z * CELL) + 0.6), Color(0.7, 0.6, 0.4)))  # shelf
+	elif interior_type == 2:
+		# Office: desk, chair, computer
+		interior_root.add_child(_make_box(Vector3(0.8, 0.5, 0.4), Vector3(_wx(x * CELL) - 0.4, 0.3, _wz(z * CELL) - 0.6), Color(0.5, 0.35, 0.25)))  # desk
+		interior_root.add_child(_make_box(Vector3(0.3, 0.6, 0.3), Vector3(_wx(x * CELL) - 0.4, 0.35, _wz(z * CELL) - 0.2), Color(0.3, 0.3, 0.4)))  # chair
+		interior_root.add_child(_make_box(Vector3(0.4, 0.3, 0.05), Vector3(_wx(x * CELL) - 0.4, 0.65, _wz(z * CELL) - 0.85), Color(0.1, 0.1, 0.15)))  # monitor
+	else:
+		# Vault: safe, money pile, gold bars
+		interior_root.add_child(_make_box(Vector3(0.8, 1.0, 0.8), Vector3(_wx(x * CELL) - 0.5, 0.55, _wz(z * CELL) - 0.5), Color(0.3, 0.3, 0.4)))  # safe
+		for gx in range(3):
+			for gz in range(3):
+				interior_root.add_child(_make_box(Vector3(0.1, 0.05, 0.1), Vector3(_wx(x * CELL) + 0.3 + gx * 0.15, 0.08, _wz(z * CELL) + 0.3 + gz * 0.15), Color(0.9, 0.75, 0.3)))  # gold
+	# Sign on the back wall
+	var sign_color: Color = Color(0.9, 0.8, 0.4)
+	var sign_text: String = "HOME"
+	if interior_type == 1:
+		sign_text = "SHOP"
+	elif interior_type == 2:
+		sign_text = "OFFICE"
+	elif interior_type == 3:
+		sign_text = "VAULT"
+	# (Label3D would be best; skip for now, the boxes are distinctive enough)
 	# Hide the exterior, show only interior + dim lighting
 	# Easiest: set all OTHER nodes' visible = false, but we tracked them via interior_root separation
 	# Move player to interior center
@@ -1324,6 +1353,9 @@ func _update_police(delta: float) -> void:
 					_announce("HIT BY POLICE (-" + str(dmg) + " HP)", Color(1, 0.3, 0.3))
 					_play_beep(110, 0.15, 0.4)
 					player_invulnerable = 0.8
+				# Smash sound
+				if ramspeed > 14.0:
+					_play_crash_sound()
 				if player_health <= 0:
 					# Death handled in _update_player_status
 					pass
@@ -2338,9 +2370,10 @@ func _build_main_menu() -> void:
 1/2/3 zones  4 roads  5 bulldoze  Click to apply
 WASD walk  F enter car  Space shoot  E enter building
 +/- sim speed  T top-down  C/V camera
-M next mission  H hide help  TAB stats  F5/F9 save/load
+M next mission  H hide help  TAB stats  B store  F5/F9 save/load
 
-Press ENTER or click to start."""
+DIFFICULTY: press 1 = EASY, 2 = NORMAL, 3 = HARD
+Press ENTER / click to start (NORMAL)."""
 	menu_cl.add_child(inst)
 	# Footer
 	var footer := Label.new()
