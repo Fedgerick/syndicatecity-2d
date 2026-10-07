@@ -15,6 +15,7 @@ var sun: DirectionalLight3D
 var world_env: WorldEnvironment
 var env: Environment
 var _t := 0.5
+var time_speed: float = 1.0  # +/- keys change this
 var lamps: Array[MeshInstance3D] = []
 var buildings_root: Node3D
 var placed_buildings: Array[Vector3i] = []  # (x, z, color_index)
@@ -44,6 +45,9 @@ var game_complete: bool = false
 var final_score: int = 0
 var final_rank: String = ""
 var final_cl: CanvasLayer
+var event_timer: float = 0.0  # counts up to next random event
+var event_active: Dictionary = {}  # current random event
+var event_cl: CanvasLayer  # HUD for active event
 var stats_bullets_fired: int = 0
 var stats_distance_walked: float = 0.0  # strings of completed mission IDs
 var current_mission: Dictionary = {}
@@ -68,6 +72,8 @@ var player_invulnerable: float = 0.0  # seconds of i-frames after respawn
 var announcement_label: Label  # big yellow banner for unlocks, mission start, etc.
 var announcement_timer: float = 0.0
 var audio_on: bool = true
+var difficulty: int = 1  # 0=easy, 1=normal, 2=hard
+var easy_mode: bool = false
 var menu_cl: CanvasLayer
 var menu_label: Label
 var buy_menu_open: bool = false
@@ -1308,14 +1314,35 @@ func _update_police(delta: float) -> void:
 # Catch any police that touches player (function level)
 	for po in police:
 		if wanted_level > 0 and po["pos"].distance_to(player_pos) < 1.5:
-			_busted()
+			# Police rams player - deal damage proportional to police speed
+			var ramspeed: float = float(po.get("speed", 0.0))
+			if ramspeed > 8.0:
+				# Damage from being rammed
+				if player_invulnerable <= 0.0:
+					var dmg: int = int(clamp(ramspeed * 1.5, 8.0, 30.0))
+					player_health -= dmg
+					_announce("HIT BY POLICE (-" + str(dmg) + " HP)", Color(1, 0.3, 0.3))
+					_play_beep(110, 0.15, 0.4)
+					player_invulnerable = 0.8
+				if player_health <= 0:
+					# Death handled in _update_player_status
+					pass
+			else:
+				_busted()
 			break
 
 
 func _busted() -> void:
 	# Reset wanted, dock budget, take player to nearest cell (the police station)
 	wanted_level = 0
-	sim_budget -= 200
+	var dock: int = 200
+	if difficulty == 2:
+		dock = 500
+	elif difficulty == 0:
+		dock = 50
+	sim_budget -= dock
+	if difficulty == 2:
+		player_health = max(0, player_health - 30)  # hard mode: police beat you
 	# Send player back to a road cell
 	player_pos = Vector3(_wx(4 * CELL), 0.7, _wz(8 * CELL))
 	player.position = player_pos
@@ -1324,7 +1351,12 @@ func _busted() -> void:
 
 
 func _add_wanted(amount: int) -> void:
-	wanted_level = clamp(wanted_level + amount, 0, 5)
+	var amt: int = amount
+	if difficulty == 2:
+		amt = int(amt * 1.5)
+	elif difficulty == 0:
+		amt = max(1, int(amt * 0.5))
+	wanted_level = clamp(wanted_level + amt, 0, 5)
 	wanted_timer = 10.0  # seconds before it starts decaying
 
 
@@ -1348,6 +1380,7 @@ func _update_wanted(delta: float) -> void:
 	_update_player_status(delta)
 	_update_announcement(delta)
 	total_play_time += delta
+	_update_random_events(delta)
 	if not game_complete and completed_missions.size() >= missions.size() and missions.size() > 0:
 		_show_game_complete()
 
@@ -1376,6 +1409,10 @@ func _on_player_death() -> void:
 	# Player killed by something (police crash, etc). Reset.
 	total_deaths += 1
 	player_health = player_max_health
+	if difficulty == 0:
+		# Easy mode: restore some inventory
+		ammo = max_ammo
+		sim_budget = max(sim_budget, 1000)
 	player_invulnerable = 3.0
 	wanted_level = max(0, wanted_level - 2)
 	# Spawn player at hospital area
@@ -2318,6 +2355,108 @@ func _dismiss_menu() -> void:
 	if menu_cl:
 		menu_cl.queue_free()
 		menu_cl = null
+
+
+
+
+func _update_random_events(delta: float) -> void:
+	event_timer += delta
+	if event_active.is_empty() and event_timer > 20.0:
+		_spawn_random_event()
+	# Active event lifetime
+	if not event_active.is_empty():
+		var life: float = event_active.get("life", 0.0)
+		life -= delta
+		event_active["life"] = life
+		# Check if player reached event position
+		var ev_pos: Vector3 = event_active.get("pos", Vector3.ZERO)
+		if player_pos.distance_to(ev_pos) < 4.0:
+			_resolve_random_event()
+		if life <= 0.0:
+			_fail_random_event()
+		_refresh_event_hud()
+
+
+func _spawn_random_event() -> void:
+	# Pick a random road cell
+	var x: int = randi_range(2, GRID - 3)
+	var z: int = randi_range(2, GRID - 3)
+	var pos := Vector3(_wx(x * CELL), 0.7, _wz(z * CELL))
+	var types: Array = ["mugging", "car_theft", "fire"]
+	var t: String = types[randi() % types.size()]
+	event_active = {
+		"type": t,
+		"pos": pos,
+		"life": 25.0,
+		"reward": 300,
+	}
+	event_timer = 0.0
+	_announce("EVENT: " + t.to_upper().replace("_", " ") + " - Investigate!", Color(1, 0.6, 0.4))
+	_build_event_marker(pos, t)
+
+
+func _build_event_marker(pos: Vector3, t: String) -> void:
+	if event_cl == null:
+		event_cl = CanvasLayer.new()
+		event_cl.layer = 9
+		add_child(event_cl)
+	for c in event_cl.get_children():
+		c.queue_free()
+	var col := Color(1, 0.5, 0.2)
+	if t == "fire":
+		col = Color(1, 0.3, 0.1)
+	elif t == "car_theft":
+		col = Color(0.9, 0.7, 0.2)
+	elif t == "mugging":
+		col = Color(1, 0.4, 0.4)
+	# 3D marker
+	var marker := _make_box(Vector3(0.5, 2.5, 0.5), pos + Vector3(0, 2.5, 0), col, true)
+	marker.name = "event_marker"
+	# HUD label
+	var lbl := Label.new()
+	lbl.text = "EVENT: " + t.to_upper().replace("_", " ") + " (" + str(int(event_active.get("life", 0.0))) + "s)"
+	lbl.position = Vector2(50, 600)
+	lbl.add_theme_font_size_override("font_size", 18)
+	lbl.add_theme_color_override("font_color", col)
+	event_cl.add_child(lbl)
+
+
+func _refresh_event_hud() -> void:
+	if event_cl == null or event_active.is_empty():
+		return
+	for c in event_cl.get_children():
+		if c is Label:
+			(c as Label).text = "EVENT: " + event_active.get("type", "").to_upper().replace("_", " ") + " (" + str(int(event_active.get("life", 0.0))) + "s)"
+	# Update marker color pulse
+	for c in event_cl.get_children():
+		if c is MeshInstance3D:
+			var phase: float = fmod(Time.get_ticks_msec() / 200.0, 2.0)
+			var mat: StandardMaterial3D = (c as MeshInstance3D).material_override
+			if mat:
+				mat.emission_energy_multiplier = 0.6 + 0.4 * abs(sin(Time.get_ticks_msec() * 0.005))
+
+
+func _resolve_random_event() -> void:
+	var reward: int = event_active.get("reward", 0)
+	sim_budget += reward
+	stats_money_earned += reward
+	_announce("EVENT RESOLVED +$" + str(reward), Color(0.4, 1.0, 0.4))
+	_play_beep(660, 0.15, 0.3)
+	_play_beep(880, 0.15, 0.3)
+	_clear_event()
+
+
+func _fail_random_event() -> void:
+	_announce("EVENT FAILED", Color(0.6, 0.6, 0.6))
+	_clear_event()
+
+
+func _clear_event() -> void:
+	event_active.clear()
+	if event_cl:
+		for c in event_cl.get_children():
+			c.queue_free()
+	event_timer = 0.0
 
 func save_city() -> void:
 	var data := {
