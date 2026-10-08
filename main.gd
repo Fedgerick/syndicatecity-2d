@@ -49,6 +49,16 @@ var sim_active_health_warning: String = ""
 var health_warning_label: Label
 var health_warning_bg: ColorRect
 var health_warning_timer: float = 0.0
+# Dynamic weather system: 0=clear, 1=rain, 2=storm (rain + darker sky + wet look)
+var weather_state: int = 0
+var weather_state_names: Array[String] = ["CLEAR", "RAIN", "STORM"]
+var weather_state_icons: Array[String] = ["SUN", "RAIN", "STORM"]
+var weather_timer: float = 0.0  # counts up; cycles state at threshold
+var weather_state_duration: float = 90.0  # seconds per state (sim time scaled)
+var rain_drops: Array[MeshInstance3D] = []  # pre-built rain particles, recycled
+var rain_root: Node3D
+var weather_label: Label
+var weather_ambient_mod: float = 0.0  # 0=clear, -0.2=rain, -0.35=storm
 var sim_unlocked: Array[String] = ["Basic Zone"]
 var missions: Array = []  # active missions
 var completed_missions: Array = []
@@ -146,6 +156,10 @@ func _ready() -> void:
 		# Debug: force a starting tax rate to verify the HUD field + warnings
 		if arg.begins_with("--start-tax="):
 			sim_residential_tax_rate = clamp(float(arg.substr(12)) / 100.0, 0.0, 0.20)
+		if arg == "--rain":
+			weather_state = 1
+		if arg == "--storm":
+			weather_state = 2
 	buildings_root = Node3D.new()
 	add_child(buildings_root)
 	_build_ground()
@@ -165,6 +179,7 @@ func _ready() -> void:
 	_build_burglar()
 	_setup_missions()
 	_build_light_env()
+	_build_weather()
 	_build_camera()
 	_build_player()
 	_build_minimap()
@@ -221,6 +236,7 @@ func _process(delta: float) -> void:
 	_update_player(delta)
 	_update_vehicle(delta)
 	_update_health_banner(delta)
+	_update_weather(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
 	growth_accum += delta
 	if growth_accum > 0.5:
@@ -460,7 +476,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_V:
 				cam_thirdperson = false
 				_refresh_camera()
-		_refresh_controls()
+			KEY_N: _cycle_weather()
+	_refresh_controls()
 
 
 func _apply_tool_at_hover() -> void:
@@ -948,12 +965,21 @@ func _apply_time() -> void:
 	sun.light_color = Color(1.0, lerpf(0.6, 0.95, is_day as float), lerpf(0.4, 0.85, is_day as float))
 	env.ambient_light_energy = lerpf(0.55, 0.9, is_day as float)
 	env.ambient_light_color = Color(0.85, 0.85, 0.95)
+	# Weather: rain/storm darkens the sky and reduces ambient
+	if weather_ambient_mod < 0.0:
+		env.ambient_light_energy = max(0.05, env.ambient_light_energy + weather_ambient_mod)
+		env.ambient_light_color = env.ambient_light_color.lerp(Color(0.55, 0.60, 0.72), 0.55)
 	if is_day:
 		env.background_mode = Environment.BG_SKY
 		env.ambient_light_sky_contribution = 1.0
 		if env.sky and env.sky.sky_material:
-			env.sky.sky_material.sky_top_color = Color(0.25, 0.45, 0.95)
-			env.sky.sky_material.sky_horizon_color = Color(0.60, 0.70, 0.95)
+			if weather_ambient_mod < 0.0:
+				# Overcast sky when raining: greyer, less saturated
+				env.sky.sky_material.sky_top_color = Color(0.40, 0.45, 0.52)
+				env.sky.sky_material.sky_horizon_color = Color(0.55, 0.58, 0.62)
+			else:
+				env.sky.sky_material.sky_top_color = Color(0.25, 0.45, 0.95)
+				env.sky.sky_material.sky_horizon_color = Color(0.60, 0.70, 0.95)
 	else:
 		env.background_mode = Environment.BG_COLOR
 		env.background_color = Color(0.05, 0.07, 0.15)
@@ -1230,7 +1256,7 @@ func _build_hud() -> void:
 	help.position = Vector2(920, 90)
 	help.add_theme_font_size_override("font_size", 14)
 	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
-	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nG = Raise wanted\nJ = Take damage\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\n[/] = Tax rate (0-20%)\nT = Top-down\nM = Next mission"
+	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nG = Raise wanted\nJ = Take damage\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\n[/] = Tax rate (0-20%)\nT = Top-down\nN = Cycle weather\nM = Next mission"
 	controls_overlay.add_child(help)
 	# Wanted meter overlay (top-left)
 	var wanted_cl := CanvasLayer.new()
@@ -3039,6 +3065,8 @@ func save_city() -> void:
 		"difficulty": difficulty,
 		"total_play_time": total_play_time,
 		"total_deaths": total_deaths,
+		"weather_state": weather_state,
+		"weather_timer": weather_timer,
 	}
 	for i in placed_buildings.size():
 		var c: Vector3i = placed_buildings[i]
@@ -3111,6 +3139,11 @@ func load_city() -> void:
 	var cm_idx: int = int(data.get("current_mission_idx", 0))
 	if cm_idx >= 0 and cm_idx < missions.size():
 		current_mission = missions[cm_idx]
+	# Weather: backwards-compatible (defaults to clear when missing)
+	weather_state = int(data.get("weather_state", 0))
+	weather_timer = float(data.get("weather_timer", 0.0))
+	_apply_weather_mod()
+	_refresh_weather_label()
 	print("LOAD: %d buildings, $", placed_buildings.size(), sim_budget, " day ", sim_day_count)
 var cars: Array[MeshInstance3D] = []
 var npcs: Array = []  # each: {mesh, path, idx, t}
@@ -3214,3 +3247,140 @@ func _build_hills() -> void:
 		for tx in [-1, 1]:
 			add_child(_make_box(Vector3(0.3, 0.8, 0.3), p + Vector3(tx * 2.0, 0.4, 2.0), Color(0.40, 0.25, 0.15)))
 			add_child(_make_box(Vector3(1.0, 1.2, 1.0), p + Vector3(tx * 2.0, 1.4, 2.0), Color(0.18, 0.40, 0.18)))
+
+# ---------------- Weather system ----------------
+# Three states: 0=clear, 1=rain, 2=storm. State cycles automatically every
+# `weather_state_duration` seconds (default 90). Rain particles are 240
+# thin emissive-blue vertical boxes pre-positioned across the city extent
+# and animated downward, recycled to the top when they reach y<=0. Storm
+# state adds wind drift on the X axis. Weather_ambient_mod feeds into
+# _apply_time() to dim ambient + greys the daytime sky. Manual cycle via
+# W key. Cmdline flags: --rain / --storm force a starting state.
+
+const RAIN_DROP_COUNT := 240
+const RAIN_AREA_HALF := 36.0  # spread a little beyond HALF=32 so drops hit hills too
+const RAIN_TOP_Y := 22.0      # ceiling where drops spawn
+const RAIN_FALL_SPEED := 18.0 # units/sec
+
+func _build_weather() -> void:
+	# Parent Node3D so we can scale/transparent-toggle in one shot
+	rain_root = Node3D.new()
+	rain_root.name = "WeatherRoot"
+	add_child(rain_root)
+	# Pre-build all rain drops once. Each drop is a thin tall box (like a
+	# stretched-out light streak). Materials are cheap (shared StandardMaterial3D
+	# would be ideal but visibility-per-drop wants a per-drop state, so we keep
+	# a small per-drop material override).
+	for i in RAIN_DROP_COUNT:
+		var drop := MeshInstance3D.new()
+		var mesh := BoxMesh.new()
+		# Thin, tall: looks like a rain streak
+		mesh.size = Vector3(0.04, 0.9, 0.04)
+		drop.mesh = mesh
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color(0.55, 0.75, 0.95)
+		mat.emission_enabled = true
+		mat.emission = Color(0.55, 0.75, 0.95)
+		mat.emission_energy_multiplier = 0.6
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		# Transparency so the streaks don't look like solid bars
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color.a = 0.55
+		drop.material_override = mat
+		# Initial random position across the city footprint
+		drop.position = Vector3(
+			randf_range(-RAIN_AREA_HALF, RAIN_AREA_HALF),
+			randf_range(0.5, RAIN_TOP_Y),
+			randf_range(-RAIN_AREA_HALF, RAIN_AREA_HALF))
+		# Per-drop speed variance for visual variety
+		drop.set_meta("speed", RAIN_FALL_SPEED * randf_range(0.85, 1.15))
+		# Slight per-drop horizontal drift so rain looks slanted in storm
+		drop.set_meta("drift", randf_range(-0.4, 0.4))
+		# Storm drops are longer (more dramatic streaks)
+		if i < RAIN_DROP_COUNT / 2:
+			drop.scale = Vector3(1.0, 1.0, 1.0)
+		else:
+			drop.scale = Vector3(1.0, 2.2, 1.0)  # long streaks
+		rain_root.add_child(drop)
+		rain_drops.append(drop)
+	rain_root.visible = false  # hidden when state=clear
+	# HUD badge (top-left, just below the wanted meter area) — create FIRST so
+	# _apply_weather_mod can toggle its visibility correctly on the initial state.
+	var cl := CanvasLayer.new()
+	cl.layer = 5
+	add_child(cl)
+	weather_label = Label.new()
+	weather_label.position = Vector2(12, 44)
+	weather_label.add_theme_font_size_override("font_size", 16)
+	weather_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.4))
+	cl.add_child(weather_label)
+	# Now apply the mod for the initial state (label exists, so visibility toggles correctly)
+	_apply_weather_mod()
+	_refresh_weather_label()
+
+func _refresh_weather_label() -> void:
+	if weather_label == null:
+		return
+	var name_str: String = weather_state_names[weather_state]
+	var icon: String = weather_state_icons[weather_state]
+	var col: Color = Color(1.0, 0.9, 0.4)
+	if weather_state == 1:
+		col = Color(0.55, 0.75, 0.95)
+	elif weather_state == 2:
+		col = Color(0.85, 0.65, 0.95)
+	weather_label.add_theme_color_override("font_color", col)
+	weather_label.text = "Weather: %s  (%s)" % [name_str, icon]
+
+func _apply_weather_mod() -> void:
+	match weather_state:
+		0: weather_ambient_mod = 0.0   # clear: no change
+		1: weather_ambient_mod = -0.20 # rain: subtle dim
+		2: weather_ambient_mod = -0.35 # storm: noticeable dim
+	rain_root.visible = weather_state != 0
+	# Hide HUD label if no CanvasLayer
+	if weather_label:
+		weather_label.visible = weather_state != 0
+	_apply_time()  # re-evaluate sky/ambient for the new state
+
+func _update_weather(delta: float) -> void:
+	# Cycle states automatically (sim-time scaled to match weather_state_duration)
+	# time_speed scales this too, so a fast-forward speeds weather cycles
+	weather_timer += delta * time_speed
+	if weather_timer >= weather_state_duration:
+		weather_timer = 0.0
+		weather_state = (weather_state + 1) % 3
+		_apply_weather_mod()
+		_refresh_weather_label()
+		_announce("WEATHER: " + weather_state_names[weather_state],
+			Color(0.55, 0.75, 0.95) if weather_state == 1 else
+			(Color(0.85, 0.65, 0.95) if weather_state == 2 else Color(1.0, 0.9, 0.4)))
+	# Animate rain drops only when raining
+	if weather_state == 0:
+		return
+	# Storm has stronger wind (X drift); rain is mostly vertical
+	var wind_x: float = 0.0
+	if weather_state == 2:
+		wind_x = 1.2 + sin(weather_timer * 0.7) * 0.5
+	for drop in rain_drops:
+		if not is_instance_valid(drop):
+			continue
+		var base_speed: float = drop.get_meta("speed") as float
+		var drift: float = drop.get_meta("drift") as float
+		var fall: float = base_speed * (1.1 if weather_state == 2 else 1.0)
+		drop.position.y -= fall * delta
+		drop.position.x += (wind_x + drift) * delta
+		# Recycle when below ground
+		if drop.position.y <= 0.2:
+			drop.position.y = RAIN_TOP_Y + randf() * 4.0
+			drop.position.x = randf_range(-RAIN_AREA_HALF, RAIN_AREA_HALF)
+			drop.position.z = randf_range(-RAIN_AREA_HALF, RAIN_AREA_HALF)
+
+func _cycle_weather() -> void:
+	# Manual override (W key) — reset timer so it doesn't auto-cycle right after
+	weather_state = (weather_state + 1) % 3
+	weather_timer = 0.0
+	_apply_weather_mod()
+	_refresh_weather_label()
+	_announce("WEATHER: " + weather_state_names[weather_state],
+		Color(0.55, 0.75, 0.95) if weather_state == 1 else
+		(Color(0.85, 0.65, 0.95) if weather_state == 2 else Color(1.0, 0.9, 0.4)))
