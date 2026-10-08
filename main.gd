@@ -41,11 +41,13 @@ var power_plants: Array[Vector3i] = []  # (x, z, color_index) where color_index 
 var water_tiles: Array[Vector2i] = []
 var powered_cells: Dictionary = {}  # key "%d,%d" -> bool
 var watered_cells: Dictionary = {}  # key "%d,%d" -> bool
+var pollution: Array[Array[float]] = []  # pollution level per cell, 0.0 to 1.0
 # City health warning system: surfaces sim failure modes to the player
 var sim_population_peak: int = 1250
 var sim_budget_deficit_days: int = 0  # consecutive days sim_budget went down
 var sim_high_tax_days: int = 0  # consecutive days tax rate > 15%
 var sim_active_health_warning: String = ""
+var avg_res_pollution: float = 0.0  # average pollution of residential zones
 var health_warning_label: Label
 var health_warning_bg: ColorRect
 var health_warning_timer: float = 0.0
@@ -166,6 +168,12 @@ func _ready() -> void:
 	_build_hills()
 	_build_water()
 	_update_water_tiles()
+	# Initialize pollution grid
+	pollution = Array.new()
+	for x in GRID:
+		pollution.append(Array.new())
+		for z in GRID:
+			pollution[x].append(0.0)
 	_build_traffic()
 	_build_cars()
 	_build_parked_cars()
@@ -253,6 +261,10 @@ func _process(delta: float) -> void:
 
 
 func _sim_daily_tick() -> void:
+	# Decay pollution slightly each day
+	for x in GRID:
+		for z in GRID:
+			pollution[x][z] *= 0.95
 	# Count buildings by zone type (color_index 0=residential, 1=commercial, 2=industrial)
 	var r_count: int = 0
 	var c_count: int = 0
@@ -263,6 +275,28 @@ func _sim_daily_tick() -> void:
 			1: c_count += 1
 			2: i_count += 1
 
+	# Update pollution from industrial buildings
+	for b in placed_buildings:
+		if b.z == 2:  # industrial
+			var radius = 2  # cells
+			for dx in range(-radius, radius+1):
+				for dz in range(-radius, radius+1):
+					var x = b.x + dx
+					var z = b.y + dz
+					if x >= 0 and x < GRID and z >= 0 and z < GRID:
+						# Add pollution, clamp to 1.0
+						pollution[x][z] = min(1.0, pollution[x][z] + 0.1)
+	# Compute average pollution of residential zones
+	var total_res_pollution: float = 0.0
+	var res_count: int = 0
+	for b in placed_buildings:
+		if b.z == 0:  # residential
+			total_res_pollution += pollution[b.x][b.y]
+			res_count += 1
+	if res_count > 0:
+		avg_res_pollution = total_res_pollution / res_count
+	else:
+		avg_res_pollution = 0.0
 	# Demand: R wants jobs nearby; C wants residents; I wants commercial
 	# SimCity-ish: R demand = 100 - clamp(jobs/2, 0, 100) + residential quality
 	# High taxes drive residents away (SimCity tax-revolt mechanic)
@@ -273,7 +307,7 @@ func _sim_daily_tick() -> void:
 	var r_base: float = 100.0 - clamp(c_count * 4.0, 0.0, 80.0) + (sim_budget / 500.0) - tax_suppression
 	var c_base: float = clamp(r_count * 6.0, 0.0, 100.0) - (i_count * 2.0)
 	var i_base: float = clamp(c_count * 5.0, 0.0, 100.0) - (r_count * 1.0)
-	sim_residential_demand = clamp(r_base, 0.0, 100.0)
+	sim_residential_demand = clamp(r_base * (1.0 - avg_res_pollution), 0.0, 100.0)
 	sim_commercial_demand = clamp(c_base, 0.0, 100.0)
 	sim_industrial_demand = clamp(i_base, 0.0, 100.0)
 
