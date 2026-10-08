@@ -82,6 +82,19 @@ var current_mission: Dictionary = {}
 var mission_overlay: CanvasLayer
 var mission_label: Label
 var mission_objective: Label
+# Delivery mission (M5 "Pizza Run") state
+var pizza_shop_pos: Vector3 = Vector3.ZERO
+var pizza_shop_mesh: MeshInstance3D  # red shop building (visual)
+var pizza_box_mesh: MeshInstance3D  # yellow pizza box, reparented to player when carried
+var delivery_target_pos: Vector3 = Vector3.ZERO
+var delivery_target_mesh: MeshInstance3D  # green target marker (visual)
+var carrying_pizza: bool = false
+var delivery_timer: float = 0.0  # counts DOWN from 90 sim-seconds
+const DELIVERY_TIME_LIMIT := 90.0
+var PIZZA_SHOP_GRID: Vector2i = Vector2i(15, 15)  # fixed location for the shop
+const DELIVERY_RADIUS := 2.5  # how close player must be to shop and target
+const PIZZA_REWARD := 400
+const PIZZA_PENALTY := 50
 var wanted_level: int = 0  # 0..5 stars
 var wanted_timer: float = 0.0
 var police: Array = []  # list of {mesh, pos, target_pos, speed}
@@ -511,6 +524,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				cam_thirdperson = false
 				_refresh_camera()
 			KEY_N: _cycle_weather()
+			KEY_M: _advance_mission()
 	_refresh_controls()
 
 
@@ -1369,7 +1383,7 @@ func _update_context_hint() -> void:
 	elif game_complete:
 		hint = "GAME COMPLETE. Press R to restart, or keep playing."
 	elif not current_mission.is_empty():
-		hint = "[MISSION] " + current_mission.get("title", "?") + ": " + current_mission.get("objective", "")
+		hint = "[MISSION] " + current_mission.get("name", current_mission.get("title", "?")) + ": " + current_mission.get("objective", "")
 	if interior_view:
 		hint += "  | Press ESC to leave building"
 	if vehicle_in:
@@ -1889,7 +1903,7 @@ func _update_wanted(delta: float) -> void:
 		if current_mission["fail_timer"] > 12.0:
 			# Mission failed
 			stats_missions_failed += 1
-			_announce("MISSION FAILED: " + str(current_mission.get("title", "?")) + " - Wanted too high!", Color(1, 0.4, 0.4))
+			_announce("MISSION FAILED: " + str(current_mission.get("name", current_mission.get("title", "?"))) + " - Wanted too high!", Color(1, 0.4, 0.4))
 			_next_mission()
 	_update_player_status(delta)
 	_update_announcement(delta)
@@ -2393,6 +2407,12 @@ func _refresh_mission_overlay() -> void:
 func _update_mission(delta: float) -> void:
 	if current_mission.is_empty() or current_mission.get("status") != "active":
 		return
+	# Pizza Run has its own state machine (pickup -> deliver); the simple
+	# target-radius check below would auto-complete the mission the moment
+	# the player walks near the target without picking up the pizza.
+	if current_mission.get("id") == "pizza_delivery":
+		_update_delivery_mission(delta)
+		return
 	var d: float = player_pos.distance_to(current_mission["target_pos"])
 	if d < current_mission["target_radius"]:
 		_complete_mission()
@@ -2438,6 +2458,195 @@ func _next_mission_2() -> void:
 	missions.append(m3)
 	current_mission = m3
 	_refresh_mission_overlay()
+
+
+# Pressed M: advance to the next mission.  Handles both forward-progress
+# (active -> complete -> next) and the "all done" end state.
+func _advance_mission() -> void:
+	# If the current mission is still in flight, treat M as "complete it now"
+	# so the player can skip stuck missions (e.g. collect_bonus's missing progress).
+	if not current_mission.is_empty() and current_mission.get("status") == "active":
+		# Special case: if a delivery is in progress, just give up — the
+		# pickup has to physically happen.
+		if current_mission.get("id") == "pizza_delivery":
+			_fail_delivery_mission(true)
+			return
+		_complete_mission()
+		# After completing, drop into the "no current mission" branch below
+		# so the next mission in the chain auto-starts.
+		current_mission = {}
+	# If the current mission is complete, pop to the next in the queue.
+	if not current_mission.is_empty() and current_mission.get("status") == "complete":
+		current_mission = {}
+	# No current mission -> start the next chain mission.  M2/M3 only auto-queue
+	# if their setup functions are called; we always have the delivery mission
+	# available, so chain straight to it for predictable behavior.
+	if current_mission.is_empty():
+		# Try the standard M2 queue first, fall back to delivery if it's missing.
+		if not (completed_missions.has("chase_the_bank_robber")) and completed_missions.has("bust_the_burglar"):
+			_next_mission()
+			return
+		if not (completed_missions.has("collect_bonus")) and completed_missions.has("chase_the_bank_robber"):
+			_next_mission_2()
+			return
+		if not (completed_missions.has("pizza_delivery")) and completed_missions.has("collect_bonus"):
+			_next_mission_3()
+			return
+		# Last-resort: if M1 is missing, re-queue it.
+		if not (completed_missions.has("bust_the_burglar")):
+			_setup_missions()
+			return
+		# All standard missions cleared and delivery already done -> start a
+		# fresh delivery run for replay value.
+		_next_mission_3()
+
+
+# Mission 5: "Pizza Run".  Build a pizza shop, a yellow box on the counter,
+# and a random green target.  Player walks to the shop, picks up the box
+# (it parents to their head), then walks to the target within 90 sim-seconds
+# for $400.  Failure deducts $50.
+func _next_mission_3() -> void:
+	# Clean up any leftover delivery visuals from a previous run.
+	_clean_delivery_mission()
+	carrying_pizza = false
+	delivery_timer = DELIVERY_TIME_LIMIT
+	# Pizza shop at fixed grid coord — build a red box with a yellow box on top.
+	pizza_shop_pos = Vector3(_wx(PIZZA_SHOP_GRID.x * CELL), 0.0, _wz(PIZZA_SHOP_GRID.y * CELL))
+	pizza_shop_mesh = _make_box(Vector3(3.0, 2.4, 3.0), pizza_shop_pos + Vector3(0, 1.2, 0), Color(0.75, 0.15, 0.10))
+	add_child(pizza_shop_mesh)
+	# Window stripes (yellow) so the shop reads as a pizzeria
+	var window_stripe := _make_box(Vector3(2.7, 0.3, 0.05), pizza_shop_pos + Vector3(0, 1.8, 1.55), Color(0.95, 0.80, 0.10))
+	add_child(window_stripe)
+	# Pizza box, yellow flat cube sitting on the counter
+	pizza_box_mesh = _make_box(Vector3(0.7, 0.15, 0.7), pizza_shop_pos + Vector3(0, 1.5, 0.0), Color(0.95, 0.80, 0.20))
+	add_child(pizza_box_mesh)
+	# Pick a random target marker somewhere on the road network (walkable area).
+	# Avoid water, and prefer cells that aren't the shop itself.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(Time.get_ticks_msec()) ^ 0x5A5A
+	var attempts: int = 0
+	while attempts < 50:
+		var tx: int = rng.randi_range(2, GRID - 3)
+		var tz: int = rng.randi_range(2, GRID - 6)  # avoid southern river strip
+		if tx == PIZZA_SHOP_GRID.x and tz == PIZZA_SHOP_GRID.y:
+			attempts += 1
+			continue
+		delivery_target_pos = Vector3(_wx(tx * CELL), 0.0, _wz(tz * CELL))
+		break
+	# Green target marker: a thin tall cylinder so the player can see it from a distance.
+	delivery_target_mesh = MeshInstance3D.new()
+	var t_mesh := CylinderMesh.new()
+	t_mesh.top_radius = 0.7
+	t_mesh.bottom_radius = 0.7
+	t_mesh.height = 0.2
+	delivery_target_mesh.mesh = t_mesh
+	var t_mat := StandardMaterial3D.new()
+	t_mat.albedo_color = Color(0.20, 0.95, 0.35)
+	t_mat.emission_enabled = true
+	t_mat.emission = Color(0.10, 0.55, 0.20)
+	t_mat.emission_energy_multiplier = 0.8
+	delivery_target_mesh.material_override = t_mat
+	delivery_target_mesh.position = delivery_target_pos + Vector3(0, 0.1, 0)
+	add_child(delivery_target_mesh)
+	# Build the mission dict
+	var m5 := {
+		"id": "pizza_delivery",
+		"name": "Pizza Run",
+		"brief": "Pick up a pizza from Tony's and deliver it to the green marker. 90 sim-seconds.",
+		"objective": "Walk to the pizza shop (red building) and pick up the order",
+		"status": "active",
+		"target_pos": delivery_target_pos,
+		"target_radius": DELIVERY_RADIUS,
+		"reward": PIZZA_REWARD,
+		"stage": "pickup",  # pickup -> deliver -> complete
+	}
+	missions.append(m5)
+	current_mission = m5
+	_refresh_mission_overlay()
+	_announce("PIZZA RUN: pick up the order at Tony's, deliver to the green marker in 90s. $%d reward." % PIZZA_REWARD, Color(0.95, 0.85, 0.30))
+
+
+# Called every frame from _update_mission: handles the pickup->deliver handoff
+# for the pizza mission (and is a no-op for other missions, which fall through
+# to the simple target-radius check).
+func _update_delivery_mission(delta: float) -> void:
+	if current_mission.get("id") != "pizza_delivery":
+		return
+	# Tick the timer once the player is carrying the pizza.
+	if carrying_pizza and current_mission.get("stage") == "deliver":
+		delivery_timer -= delta
+		if delivery_timer <= 0.0:
+			_fail_delivery_mission(false)
+			return
+	# Keep the box floating above the player while they're carrying it.
+	if carrying_pizza and pizza_box_mesh and is_instance_valid(pizza_box_mesh) and player and is_instance_valid(player):
+		if pizza_box_mesh.get_parent() != player:
+			pizza_box_mesh.reparent(player)
+		pizza_box_mesh.position = Vector3(0, 1.6, 0)
+	# Pickup: walk to the shop counter while in the "pickup" stage.
+	if current_mission.get("stage") == "pickup" and not carrying_pizza:
+		var d: float = player_pos.distance_to(pizza_shop_pos)
+		if d < DELIVERY_RADIUS:
+			carrying_pizza = true
+			current_mission["stage"] = "deliver"
+			current_mission["objective"] = "Deliver to the green marker (%.0fs left)" % delivery_timer
+			_refresh_mission_overlay()
+			_announce("PIZZA ACQUIRED — run!", Color(0.95, 0.85, 0.30))
+			_play_collect_pickup_sound()
+	# Deliver: walk to the target marker while carrying.
+	elif current_mission.get("stage") == "deliver" and carrying_pizza:
+		current_mission["objective"] = "Deliver to the green marker (%.0fs left)" % max(0.0, delivery_timer)
+		var d2: float = player_pos.distance_to(delivery_target_pos)
+		if d2 < DELIVERY_RADIUS:
+			_complete_delivery_mission()
+
+
+func _complete_delivery_mission() -> void:
+	_play_mission_complete_sound()
+	current_mission["status"] = "complete"
+	sim_budget += PIZZA_REWARD
+	stats_money_earned += PIZZA_REWARD
+	completed_missions.append("pizza_delivery")
+	# Small population happiness nudge — residents like fast delivery
+	sim_population_peak = max(sim_population_peak, sim_population + 5)
+	_announce("PIZZA DELIVERED! +$%d  (5 grateful residents)" % PIZZA_REWARD, Color(0.40, 0.95, 0.40))
+	_clean_delivery_mission()
+	_refresh_mission_overlay()
+
+
+func _fail_delivery_mission(skipped: bool) -> void:
+	current_mission["status"] = "failed"
+	stats_missions_failed += 1
+	# Penalty only when the player physically ran out the clock — skipping via M
+	# shouldn't cost them money.
+	if not skipped:
+		sim_budget = max(-5000, sim_budget - PIZZA_PENALTY)
+		_announce("PIZZA COLD! -$%d penalty." % PIZZA_PENALTY, Color(0.95, 0.40, 0.40))
+	else:
+		_announce("PIZZA RUN skipped.", Color(0.70, 0.70, 0.70))
+	# Mark the mission as completed (in the "failed" sense) so the queue advances
+	completed_missions.append("pizza_delivery")
+	_clean_delivery_mission()
+	_refresh_mission_overlay()
+
+
+func _clean_delivery_mission() -> void:
+	# Free the shop, box, and target marker.  Idempotent.
+	if pizza_shop_mesh and is_instance_valid(pizza_shop_mesh):
+		pizza_shop_mesh.queue_free()
+	pizza_shop_mesh = null
+	if pizza_box_mesh and is_instance_valid(pizza_box_mesh):
+		# Reparent off the player first so queue_free doesn't fight the player node
+		var old_parent := pizza_box_mesh.get_parent()
+		if old_parent and old_parent != self:
+			old_parent.remove_child(pizza_box_mesh)
+		pizza_box_mesh.queue_free()
+	pizza_box_mesh = null
+	if delivery_target_mesh and is_instance_valid(delivery_target_mesh):
+		delivery_target_mesh.queue_free()
+	delivery_target_mesh = null
+	carrying_pizza = false
+	delivery_timer = 0.0
 
 
 func _build_burglar() -> void:
@@ -3173,6 +3382,13 @@ func load_city() -> void:
 	var cm_idx: int = int(data.get("current_mission_idx", 0))
 	if cm_idx >= 0 and cm_idx < missions.size():
 		current_mission = missions[cm_idx]
+	# Pizza delivery needs live mesh state that isn't part of the save; if the
+	# loaded mission is in flight, clean it up and re-queue from scratch so the
+	# shop/target/box visuals reappear.
+	if not current_mission.is_empty() and current_mission.get("id") == "pizza_delivery":
+		_clean_delivery_mission()
+		current_mission = {}
+		# Don't auto-restart; let the player press M when ready.
 	# Weather: backwards-compatible (defaults to clear when missing)
 	weather_state = int(data.get("weather_state", 0))
 	weather_timer = float(data.get("weather_timer", 0.0))
@@ -3408,6 +3624,8 @@ func _update_weather(delta: float) -> void:
 			drop.position.y = RAIN_TOP_Y + randf() * 4.0
 			drop.position.x = randf_range(-RAIN_AREA_HALF, RAIN_AREA_HALF)
 			drop.position.z = randf_range(-RAIN_AREA_HALF, RAIN_AREA_HALF)
+
+
 
 func _cycle_weather() -> void:
 	# Manual override (W key) — reset timer so it doesn't auto-cycle right after

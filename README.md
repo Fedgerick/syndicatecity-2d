@@ -64,14 +64,15 @@ Press **1** / **2** / **3** on the main menu (or `--easy` / `--hard`).
 
 ## Missions
 
-Four story missions, $7,750 total earnings:
+Five story missions, $8,150 total earnings:
 
-1. **Bust the Burglar** — Find and arrest the burglar (yellow figure, $1500).
-2. **Chase the Bank Robber** — Catch the fleeing robber (red figure, $1000).
-3. **Tax Bonus** — Collect 5 yellow money pickups on the map ($250).
+1. **Bust the Burglar** — Find and arrest the burglar (red capsule in the residential zone, $500).
+2. **Bank Robbery in Progress** — Drive within 5m of the robber's getaway car ($1500).
+3. **Tax Bonus** — Collect 5 yellow money pickups on the map ($750).
 4. **The Big Heist** — Press H near the bank to start, escape the police for 30 seconds ($5000).
+5. **Pizza Run** — Walk to the pizza shop (red building at grid 15,15), pick up the order, and deliver it to the green marker within 90 sim-seconds ($400). Failure costs $50. Press M to skip the pickup (no penalty).
 
-Press **M** to advance between missions. Each mission has its own wanted threshold and objectives.
+Press **M** to advance between missions. Each mission has its own wanted threshold and objectives. M can also skip a stuck active mission (fails the delivery, but completes the others).
 
 ## Game systems
 
