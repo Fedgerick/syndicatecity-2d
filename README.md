@@ -81,6 +81,7 @@ Press **M** to advance between missions. Each mission has its own wanted thresho
 - **Vehicles** — 4 parked cars (4 corners) + 12 traffic cars on roads.
 - **Buildings** — 297 zoned cells + 12 rich interiors (apartment / shop / office / vault based on grid hash).
 - **Day/night** — 60-sim-second days. Streetlamps turn on at night. Commercial zones glow with neon storefront lighting at night; residential/industrial windows emit warm light.
+- **Vehicle lights** — Traffic, parked, and police cars get 2 white headlights at the front and 2 red tail lights at the rear. They auto-toggle with the day/night cycle, so the city has moving points of light at night.
 - **City health warnings** — Banners surface SimCity failure modes so the simulation has a visible feedback loop: BUDGET CRISIS (3+ days deficit, red), POPULATION EXODUS (down 15% from peak, orange), NEED WORKERS (industry outpacing residential, yellow), UNEMPLOYMENT (residential without jobs, blue). Each warning names the cause and the fix.
 - **Random events** — every 20 seconds a mugging/car-theft/fire spawns. Get within 4m to resolve for $300.
 - **Store** — Health Pack ($200), Ammo Crate ($150), Bail Bond ($500), Smog Upgrade ($1000).

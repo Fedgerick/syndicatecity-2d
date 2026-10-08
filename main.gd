@@ -36,6 +36,7 @@ var sim_day_accum: float = 0.0  # seconds until next sim day
 # Power system
 const COAL_POWER_RADIUS = 12
 const WIND_POWER_RADIUS = 8
+const WATER_RADIUS = 2
 var power_plants: Array[Vector3i] = []  # (x, z, color_index) where color_index 3=coal, 4=wind
 var powered_cells: Dictionary = {}  # key "%d,%d" -> bool
 # City health warning system: surfaces sim failure modes to the player
@@ -673,6 +674,65 @@ func _make_box(s: Vector3, p: Vector3, c: Color, em := false) -> MeshInstance3D:
 	return m
 
 
+# Attach 4 small emissive boxes to a car: 2 white headlights at the front, 2 red
+# tail lights at the rear. Lights are children of `car` so they inherit its
+# rotation/position. Long axis of the body tells us which local axis is "front":
+#   long_is_z=true  -> long axis is Z, headlights at -Z, taillights at +Z
+#   long_is_z=false -> long axis is X, headlights at -X, taillights at +X
+# We store all four lights in car.set_meta("car_lights", [h0, h1, t0, t1])
+# so _apply_time() can toggle their emission_enabled with the day/night cycle.
+func _add_car_lights(car: MeshInstance3D, long_is_z: bool, half_long: float, half_short: float) -> void:
+	var lights: Array[MeshInstance3D] = []
+	var head_col := Color(1.0, 0.95, 0.78)
+	var tail_col := Color(0.95, 0.18, 0.10)
+	var lamp_size := Vector3(0.18, 0.18, 0.18) if long_is_z else Vector3(0.18, 0.18, 0.18)
+	# Side offsets are along the SHORT axis so the two lamps sit on the left/right
+	# edges of the car body. Inset slightly inward from the body half-width.
+	var side_off: float = half_short * 0.55
+	if long_is_z:
+		# Front (-Z) headlights, rear (+Z) tail lights
+		var front_z: float = -half_long * 0.92
+		var rear_z: float = half_long * 0.92
+		var h_l := _make_lamp(Vector3(side_off, -0.05, front_z), head_col, true)
+		var h_r := _make_lamp(Vector3(-side_off, -0.05, front_z), head_col, true)
+		var t_l := _make_lamp(Vector3(side_off, -0.05, rear_z), tail_col, true)
+		var t_r := _make_lamp(Vector3(-side_off, -0.05, rear_z), tail_col, true)
+		car.add_child(h_l); car.add_child(h_r); car.add_child(t_l); car.add_child(t_r)
+		lights = [h_l, h_r, t_l, t_r]
+	else:
+		# Long axis is X: front (-X) headlights, rear (+X) tail lights
+		var front_x: float = -half_long * 0.92
+		var rear_x: float = half_long * 0.92
+		var h_l := _make_lamp(Vector3(front_x, -0.05, side_off), head_col, true)
+		var h_r := _make_lamp(Vector3(front_x, -0.05, -side_off), head_col, true)
+		var t_l := _make_lamp(Vector3(rear_x, -0.05, side_off), tail_col, true)
+		var t_r := _make_lamp(Vector3(rear_x, -0.05, -side_off), tail_col, true)
+		car.add_child(h_l); car.add_child(h_r); car.add_child(t_l); car.add_child(t_r)
+		lights = [h_l, h_r, t_l, t_r]
+	# Store with a per-light color so _apply_time can pick the right brightness
+	car.set_meta("car_lights", lights)
+	car.set_meta("car_lights_long_is_z", long_is_z)
+
+
+# Helper for _add_car_lights: one small emissive lamp at a local offset.
+# `em` starts ON (we want them visible at night) but _apply_time() will turn
+# them off during the day.
+func _make_lamp(local_pos: Vector3, col: Color, em: bool) -> MeshInstance3D:
+	var m := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.18, 0.18, 0.18)
+	m.mesh = mesh
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = col
+	if em:
+		mat.emission_enabled = false  # off by default; _apply_time() enables at night
+		mat.emission = col
+		mat.emission_energy_multiplier = 2.2
+	m.material_override = mat
+	m.position = local_pos
+	return m
+
+
 func _build_ground() -> void:
 	var plane := MeshInstance3D.new()
 	var pmesh := PlaneMesh.new()
@@ -904,8 +964,52 @@ func _apply_time() -> void:
 				bmat.emission = Color(1.0, 0.85, 0.4)
 				bmat.emission_energy_multiplier = window_e
 
+	# Vehicle headlights + tail lights: turn on at night, off by day.
+	# Iterate all cars (traffic + parked + police) via the meta key set in
+	# _add_car_lights(). car_lights = [h_left, h_right, t_left, t_right].
+	var car_lights_on: bool = not is_day
+	# Traffic (12 cars in `cars`)
+	for car in cars:
+		if not is_instance_valid(car):
+			continue
+		var lights_meta = car.get_meta("car_lights", null)
+		if lights_meta == null:
+			continue
+		for lamp in lights_meta:
+			if is_instance_valid(lamp) and lamp.material_override:
+				lamp.material_override.emission_enabled = car_lights_on
+	# Parked (4 cars in `vehicles`)
+	for v in vehicles:
+		var vmesh: MeshInstance3D = v.get("mesh")
+		if vmesh == null or not is_instance_valid(vmesh):
+			continue
+		var lights_meta2 = vmesh.get_meta("car_lights", null)
+		if lights_meta2 == null:
+			continue
+		for lamp in lights_meta2:
+			if is_instance_valid(lamp) and lamp.material_override:
+				lamp.material_override.emission_enabled = car_lights_on
+	# Police (2 units in `police`)
+	for p in police:
+		var pmesh: MeshInstance3D = p.get("mesh")
+		if pmesh == null or not is_instance_valid(pmesh):
+			continue
+		var lights_meta3 = pmesh.get_meta("car_lights", null)
+		if lights_meta3 == null:
+			continue
+		for lamp in lights_meta3:
+			if is_instance_valid(lamp) and lamp.material_override:
+				lamp.material_override.emission_enabled = car_lights_on
+	# Player's current vehicle (if driving)
+	if vehicle_in and is_instance_valid(current_vehicle):
+		var lights_meta4 = current_vehicle.get_meta("car_lights", null)
+		if lights_meta4 != null:
+			for lamp in lights_meta4:
+				if is_instance_valid(lamp) and lamp.material_override:
+					lamp.material_override.emission_enabled = car_lights_on
 
-var _camera: Camera3D
+
+	var _camera: Camera3D
 
 func _build_camera() -> void:
 	_camera = Camera3D.new()
@@ -1564,6 +1668,8 @@ func _build_police() -> void:
 		mat.albedo_color = Color(0.10, 0.15, 0.50)  # dark blue
 		car.material_override = mat
 		car.position = pos
+		# Night lights so police look like they're chasing with high beams on at night
+		_add_car_lights(car, true, 1.8, 0.9)
 		add_child(car)
 		# Roof light bar
 		var lightbar := MeshInstance3D.new()
@@ -2291,6 +2397,9 @@ func _build_parked_cars() -> void:
 		mat.albedo_color = colors[i]
 		car.material_override = mat
 		car.position = pos
+		# Night lights: 2 white headlights at the front (-Z), 2 red taillights at +Z.
+		# The body is 1.6 wide on X, 3.6 long on Z, so half_long=1.8, half_short=0.8.
+		_add_car_lights(car, true, 1.8, 0.8)
 		# Random initial yaw
 		var yaw: float = randf() * TAU
 		car.rotation.y = yaw
@@ -3003,6 +3112,10 @@ func _build_cars() -> void:
 		# headlights as small emissive
 		mat.emission_enabled = false
 		car.material_override = mat
+		# Add 4 small lamp children (2 white front, 2 red rear) so night driving
+		# looks right. Long axis depends on whether this car is on a vertical road.
+		var body_size: Vector3 = Vector3(0.9 if is_vert else 1.6, 0.5, 1.6 if is_vert else 0.9)
+		_add_car_lights(car, is_vert, body_size.z * 0.5, body_size.x * 0.5)
 		add_child(car)
 		car.set_meta("path", path)
 		car.set_meta("t", rng.randf())
