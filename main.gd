@@ -38,7 +38,9 @@ const COAL_POWER_RADIUS = 12
 const WIND_POWER_RADIUS = 8
 const WATER_RADIUS = 2
 var power_plants: Array[Vector3i] = []  # (x, z, color_index) where color_index 3=coal, 4=wind
+var water_tiles: Array[Vector2i] = []
 var powered_cells: Dictionary = {}  # key "%d,%d" -> bool
+var watered_cells: Dictionary = {}  # key "%d,%d" -> bool
 # City health warning system: surfaces sim failure modes to the player
 var sim_population_peak: int = 1250
 var sim_budget_deficit_days: int = 0  # consecutive days sim_budget went down
@@ -149,6 +151,7 @@ func _ready() -> void:
 	_build_ground()
 	_build_hills()
 	_build_water()
+	_update_water_tiles()
 	_build_traffic()
 	_build_cars()
 	_build_parked_cars()
@@ -289,6 +292,7 @@ func _sim_daily_tick() -> void:
 	sim_day_count += 1
 	_update_city_health(r_count, c_count, i_count)
 	_update_power_coverage()
+	_update_water_coverage()
 
 
 func _update_city_health(r_count: int, c_count: int, i_count: int) -> void:
@@ -400,6 +404,8 @@ func _grow_random_cell() -> void:
 	var idx: int = randi() % placed_buildings.size()
 	var cell: Vector3i = placed_buildings[idx]
 	var key := "%d,%d" % [cell.x, cell.y]
+	if not watered_cells.has(key):
+		return
 	var d: int = cell_density.get(key, 1)
 	if d >= DENSITY_MAX:
 		return
@@ -531,6 +537,27 @@ func _update_power_coverage() -> void:
 				powered = true
 				break
 		powered_cells[key] = powered
+	func _update_water_coverage() -> void:
+		var WATER_RADIUS = WATER_RADIUS
+		for pb in placed_buildings:
+			var key = "%d,%d" % [pb.x, pb.y]
+			var watered = false
+			for wt in water_tiles:
+				var dx = pb.x - wt.x
+				var dz = pb.y - wt.y
+				var dist = sqrt(dx*dx + dz*dz)
+				if dist <= WATER_RADIUS:
+					watered = true
+					break
+			watered_cells[key] = watered
+
+	func _update_water_tiles() -> void:
+		water_tiles.clear()
+		for x in GRID:
+			for z in GRID:
+				if _is_water(x, z):
+					water_tiles.append(Vector2i(x, z))
+
 
 func _bk(x: int, z: int) -> String:
 	return "%d,%d" % [x, z]
