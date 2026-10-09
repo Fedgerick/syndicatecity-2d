@@ -41,7 +41,7 @@ var power_plants: Array[Vector3i] = []  # (x, z, color_index) where color_index 
 var water_tiles: Array[Vector2i] = []
 var powered_cells: Dictionary = {}  # key "%d,%d" -> bool
 var watered_cells: Dictionary = {}  # key "%d,%d" -> bool
-var pollution: Array[Array[float]] = []  # pollution level per cell, 0.0 to 1.0
+var pollution: Array = []  # pollution[x][z] -> float  # pollution level per cell, 0.0 to 1.0
 # City health warning system: surfaces sim failure modes to the player
 var sim_population_peak: int = 1250
 var sim_budget_deficit_days: int = 0  # consecutive days sim_budget went down
@@ -115,6 +115,13 @@ var announcement_timer: float = 0.0
 var audio_on: bool = true
 var difficulty: int = 1
 var paused: bool = false
+var pause_cl: CanvasLayer
+var menu_footer: Label
+var stats_cl: CanvasLayer
+var stats_label: Label
+# Story missions in play order. M advances to the first one not yet done;
+# the game is complete once every id here is in completed_missions.
+const MISSION_CHAIN: Array[String] = ["bust_the_burglar", "chase_the_bank_robber", "collect_bonus", "the_big_heist", "pizza_delivery"]
 var damage_flash: float = 0.0
 var damage_flash_cl: CanvasLayer  # 0=easy, 1=normal, 2=hard
 var easy_mode: bool = false
@@ -156,6 +163,7 @@ var controls_label: Label
 
 
 func _ready() -> void:
+	_setup_input_map()
 	# Auto-dismiss menu if --start passed on command line
 	var _auto_start: bool = false
 	var _pending_warning: String = ""
@@ -182,9 +190,9 @@ func _ready() -> void:
 	_build_water()
 	_update_water_tiles()
 	# Initialize pollution grid
-	pollution = Array.new()
+	pollution = []
 	for x in GRID:
-		pollution.append(Array.new())
+		pollution.append([])
 		for z in GRID:
 			pollution[x].append(0.0)
 	_build_traffic()
@@ -192,6 +200,7 @@ func _ready() -> void:
 	_build_parked_cars()
 	_build_pickups()
 	_build_npcs()
+	_build_cone_pool()
 	_build_trees()
 	_build_roads()
 	_build_initial_buildings()
@@ -241,12 +250,29 @@ func _ready() -> void:
 
 
 
+# Godot's built-in ui_* actions only cover the arrow keys. The player and
+# vehicle code polls ui_up/down/left/right, so bind WASD to them as well.
+func _setup_input_map() -> void:
+	var binds := {"ui_up": KEY_W, "ui_down": KEY_S, "ui_left": KEY_A, "ui_right": KEY_D}
+	for action in binds:
+		var ev := InputEventKey.new()
+		ev.physical_keycode = binds[action]
+		InputMap.action_add_event(action, ev)
+
+
 func _process(delta: float) -> void:
+	if paused or game_over:
+		return
 	# Slowly advance time so user sees day/night if windowed
 	_t = fmod(_t + delta * 0.02, 1.0)
 	_apply_time()
 	_update_traffic(delta)
+	_update_traffic_cones(delta)
 	_update_cars(delta)
+	_update_weather(delta)
+	if menu_cl:
+		# Title screen: the city animates behind the menu, gameplay waits
+		return
 	_update_police(delta)
 	_update_mission(delta)
 	_update_heist(delta)
@@ -257,7 +283,6 @@ func _process(delta: float) -> void:
 	_update_player(delta)
 	_update_vehicle(delta)
 	_update_health_banner(delta)
-	_update_weather(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
 	growth_accum += delta
 	if growth_accum > 0.5:
@@ -271,6 +296,8 @@ func _process(delta: float) -> void:
 	_refresh_hud()
 	_refresh_wanted_label()
 	_update_minimap()
+	if stats_cl and stats_cl.visible:
+		_refresh_stats_overlay()
 
 
 func _sim_daily_tick() -> void:
@@ -477,6 +504,15 @@ func _grow_random_cell() -> void:
 	_refresh_building_at(cell.x, cell.y)
 
 
+# Modal screens (title menu, game over, pause, store) swallow input so keys
+# like 1/2/3 mean "difficulty" or "buy" there instead of zone tools. This runs
+# in _input (before the GUI) because the overlays' full-screen ColorRects would
+# otherwise eat mouse clicks before _unhandled_input ever saw them.
+func _input(event: InputEvent) -> void:
+	if _handle_modal_input(event):
+		get_viewport().set_input_as_handled()
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		var hit := _raycast_ground(event.position)
@@ -492,6 +528,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			cam_dist = minf(cam_dist + 5, 200.0)
 			_refresh_camera()
 	elif event is InputEventKey and event.pressed:
+		# Holding Space auto-fires; every other key acts once per press
+		if event.echo and event.keycode != KEY_SPACE:
+			return
 		match event.keycode:
 			KEY_1: current_tool = "zone_res"
 			KEY_2: current_tool = "zone_com"
@@ -500,7 +539,32 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_5: current_tool = "bulldoze"
 			KEY_6: current_tool = "zone_coal"
 			KEY_7: current_tool = "zone_wind"
-			KEY_0, KEY_SPACE: current_tool = "select"
+			KEY_0: current_tool = "select"
+			KEY_SPACE: _try_shoot()
+			KEY_F:
+				if vehicle_in:
+					_exit_vehicle()
+				else:
+					_try_enter_vehicle()
+			KEY_E:
+				if interior_view:
+					_exit_building()
+				else:
+					_try_enter_building()
+			KEY_ESCAPE:
+				if interior_view:
+					_exit_building()
+				else:
+					_set_paused(true)
+			KEY_P: _set_paused(true)
+			KEY_B: _toggle_buy_menu()
+			KEY_TAB: _toggle_stats()
+			KEY_G: _add_wanted(1)
+			KEY_J:
+				if player_invulnerable <= 0.0:
+					player_health -= 10
+					damage_flash = 0.2
+					_announce("OUCH (-10 HP)", Color(1, 0.3, 0.3))
 			KEY_T: cam_topdown = not cam_topdown; _refresh_camera()
 			KEY_F5: save_city()
 			KEY_F9: load_city()
@@ -525,7 +589,87 @@ func _unhandled_input(event: InputEvent) -> void:
 				_refresh_camera()
 			KEY_N: _cycle_weather()
 			KEY_M: _advance_mission()
-	_refresh_controls()
+		_refresh_controls()
+
+
+# Returns true when a modal screen is up and consumed the event.
+func _handle_modal_input(event: InputEvent) -> bool:
+	var key: int = -1
+	if event is InputEventKey and event.pressed and not event.echo:
+		key = event.keycode
+	var clicked: bool = event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT
+	if menu_cl:
+		match key:
+			KEY_1: _set_difficulty(0)
+			KEY_2: _set_difficulty(1)
+			KEY_3: _set_difficulty(2)
+			KEY_ENTER, KEY_KP_ENTER, KEY_SPACE: _dismiss_menu()
+			KEY_ESCAPE: get_tree().quit()
+		if clicked:
+			_dismiss_menu()
+		return true
+	if game_over:
+		match key:
+			KEY_R: _respawn_after_game_over()
+			KEY_ESCAPE, KEY_Q: get_tree().quit()
+		return true
+	if final_cl:
+		match key:
+			KEY_R: _restart_game()
+			KEY_ENTER, KEY_KP_ENTER, KEY_ESCAPE:
+				# Close the results screen and keep playing
+				final_cl.queue_free()
+				final_cl = null
+		return true
+	if paused:
+		match key:
+			KEY_P, KEY_ESCAPE: _set_paused(false)
+			KEY_Q: get_tree().quit()
+		return true
+	if buy_menu_open:
+		match key:
+			KEY_1: _buy_item(1)
+			KEY_2: _buy_item(2)
+			KEY_3: _buy_item(3)
+			KEY_4: _buy_item(4)
+			KEY_0, KEY_B, KEY_ESCAPE: _toggle_buy_menu()
+		return key != -1 or clicked
+	return false
+
+
+func _set_difficulty(d: int) -> void:
+	difficulty = d
+	if menu_footer:
+		menu_footer.text = "Difficulty: %s  -  press ENTER or click to start" % ["EASY", "NORMAL", "HARD"][d]
+
+
+func _set_paused(on: bool) -> void:
+	paused = on
+	if on and pause_cl == null:
+		pause_cl = CanvasLayer.new()
+		pause_cl.layer = 14
+		add_child(pause_cl)
+		var bg := ColorRect.new()
+		bg.color = Color(0, 0, 0, 0.6)
+		bg.size = Vector2(1280, 720)
+		pause_cl.add_child(bg)
+		var t := Label.new()
+		t.text = "PAUSED\n\nP / Esc  resume\nQ  quit"
+		t.position = Vector2(0, 250)
+		t.size = Vector2(1280, 200)
+		t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		t.add_theme_font_size_override("font_size", 36)
+		t.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
+		pause_cl.add_child(t)
+	elif not on and pause_cl:
+		pause_cl.queue_free()
+		pause_cl = null
+
+
+func _toggle_stats() -> void:
+	if stats_cl:
+		stats_cl.visible = not stats_cl.visible
+		_refresh_stats_overlay()
 
 
 func _apply_tool_at_hover() -> void:
@@ -602,26 +746,26 @@ func _update_power_coverage() -> void:
 				powered = true
 				break
 		powered_cells[key] = powered
-	func _update_water_coverage() -> void:
-		var WATER_RADIUS = WATER_RADIUS
-		for pb in placed_buildings:
-			var key = "%d,%d" % [pb.x, pb.y]
-			var watered = false
-			for wt in water_tiles:
-				var dx = pb.x - wt.x
-				var dz = pb.y - wt.y
-				var dist = sqrt(dx*dx + dz*dz)
-				if dist <= WATER_RADIUS:
-					watered = true
-					break
-			watered_cells[key] = watered
 
-	func _update_water_tiles() -> void:
-		water_tiles.clear()
-		for x in GRID:
-			for z in GRID:
-				if _is_water(x, z):
-					water_tiles.append(Vector2i(x, z))
+func _update_water_coverage() -> void:
+	for pb in placed_buildings:
+		var key = "%d,%d" % [pb.x, pb.y]
+		var watered = false
+		for wt in water_tiles:
+			var dx = pb.x - wt.x
+			var dz = pb.y - wt.y
+			var dist = sqrt(dx*dx + dz*dz)
+			if dist <= WATER_RADIUS:
+				watered = true
+				break
+		watered_cells[key] = watered
+
+func _update_water_tiles() -> void:
+	water_tiles.clear()
+	for x in GRID:
+		for z in GRID:
+			if _is_water(x, z):
+				water_tiles.append(Vector2i(x, z))
 
 
 func _bk(x: int, z: int) -> String:
@@ -1073,7 +1217,7 @@ func _apply_time() -> void:
 	for car in cars:
 		if not is_instance_valid(car):
 			continue
-		var lights_meta = car.get_meta("car_lights", null)
+		var lights_meta = car.get_meta("car_lights", [])
 		if lights_meta == null:
 			continue
 		for lamp in lights_meta:
@@ -1084,7 +1228,7 @@ func _apply_time() -> void:
 		var vmesh: MeshInstance3D = v.get("mesh")
 		if vmesh == null or not is_instance_valid(vmesh):
 			continue
-		var lights_meta2 = vmesh.get_meta("car_lights", null)
+		var lights_meta2 = vmesh.get_meta("car_lights", [])
 		if lights_meta2 == null:
 			continue
 		for lamp in lights_meta2:
@@ -1095,7 +1239,7 @@ func _apply_time() -> void:
 		var pmesh: MeshInstance3D = p.get("mesh")
 		if pmesh == null or not is_instance_valid(pmesh):
 			continue
-		var lights_meta3 = pmesh.get_meta("car_lights", null)
+		var lights_meta3 = pmesh.get_meta("car_lights", [])
 		if lights_meta3 == null:
 			continue
 		for lamp in lights_meta3:
@@ -1103,14 +1247,14 @@ func _apply_time() -> void:
 				lamp.material_override.emission_enabled = car_lights_on
 	# Player's current vehicle (if driving)
 	if vehicle_in and is_instance_valid(current_vehicle):
-		var lights_meta4 = current_vehicle.get_meta("car_lights", null)
+		var lights_meta4 = current_vehicle.get_meta("car_lights", [])
 		if lights_meta4 != null:
 			for lamp in lights_meta4:
 				if is_instance_valid(lamp) and lamp.material_override:
 					lamp.material_override.emission_enabled = car_lights_on
 
 
-	var _camera: Camera3D
+var _camera: Camera3D
 
 func _build_camera() -> void:
 	_camera = Camera3D.new()
@@ -1211,7 +1355,7 @@ func _update_player(delta: float) -> void:
 
 
 func _refresh_player_camera() -> void:
-	var cam: Camera3D = $Camera3D
+	var cam: Camera3D = _camera
 	if cam == null:
 		return
 	var offset := Vector3(
@@ -1304,7 +1448,7 @@ func _build_hud() -> void:
 	help.position = Vector2(920, 90)
 	help.add_theme_font_size_override("font_size", 14)
 	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
-	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nG = Raise wanted\nJ = Take damage\nEsc = Exit\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\n[/] = Tax rate (0-20%)\nT = Top-down\nN = Cycle weather\nM = Next mission"
+	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nB = Store  TAB = Stats\nG = Raise wanted\nJ = Take damage\nP / Esc = Pause\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\n[/] = Tax rate (0-20%)\nT = Top-down\nN = Cycle weather\nM = Next mission"
 	controls_overlay.add_child(help)
 	# Wanted meter overlay (top-left)
 	var wanted_cl := CanvasLayer.new()
@@ -1422,6 +1566,10 @@ func _refresh_hud() -> void:
 		_refresh_demand_bars()
 var traffic_dots: Array[MeshInstance3D] = []
 var traffic_paths: Array = []  # each = Array of Vector3 world positions
+# Traffic cones: dynamic roadblocks that spawn at events + police roadblocks
+var traffic_cones: Array[MeshInstance3D] = []  # active cones currently on the map
+var cone_pool: Array[MeshInstance3D] = []      # pre-built cones (visible=false until placed)
+const CONE_SPAWN_RADIUS := 3.0                 # scatter radius around an event
 
 
 func _build_traffic() -> void:
@@ -1460,6 +1608,116 @@ func _build_traffic() -> void:
 		dot.set_meta("path", path)
 		dot.set_meta("t", rng.randf())
 		traffic_dots.append(dot)
+
+# Traffic cones: pre-build a pool of 20 cones (visible=false) that _place_cone()
+# repositions and shows. Cones are orange, emissive, and pulse at 3 Hz so they
+# stand out at night. They spawn at random events (roadblocks) and police
+# roadblocks (wanted >= 3).
+const CONE_POOL_SIZE := 20
+const CONE_PULSE_HZ := 3.0
+
+func _build_cone_pool() -> void:
+	for i in CONE_POOL_SIZE:
+		var c := MeshInstance3D.new()
+		var mesh := CylinderMesh.new()
+		# Classic traffic cone: wide base, narrow top, tapered
+		mesh.top_radius = 0.06
+		mesh.bottom_radius = 0.32
+		mesh.height = 0.55
+		c.mesh = mesh
+		var mat := StandardMaterial3D.new()
+		# Bright orange, emissive so cones glow at night
+			(mat.albedo_color = Color(1.0, 0.35, 0.05)
+			 mat.emission_enabled = true
+			 mat.emission = Color(1.0, 0.35, 0.05)
+			 mat.emission_energy_multiplier = 1.2
+			 mat.roughness = 0.7
+			 c.material_override = mat
+			 c.position = Vector3(0, 0.275, 0)
+			 c.visible = false
+			 add_child(c)
+			 cone_pool.append(c)
+
+# Place a cone at `pos` (world Vector3). Returns the cone MeshInstance3D or null
+# if the pool is exhausted. The cone is repositioned, shown, and tagged with
+# its spawn time so _update_traffic_cones() can pulse it.
+func _place_cone(pos: Vector3) -> MeshInstance3D:
+	for c in cone_pool:
+		if not c.visible:
+			c.position = pos + Vector3(0, 0.275, 0)
+			c.visible = true
+			c.set_meta("spawn_t", Time.get_ticks_msec() / 1000.0)
+			return c
+	return null
+
+# Remove ALL active cones (used when a random event is resolved/failed).
+func _clear_all_cones() -> void:
+	for c in traffic_cones:
+		if is_instance_valid(c):
+			c.visible = false
+			c.set_meta("spawn_t", 0.0)
+	traffic_cones.clear()
+
+# Pulse cones at CONE_PULSE_HZ so they flicker like real traffic cones.
+# Also recycles cones that have been alive too long (> 60s).
+func _update_traffic_cones(delta: float) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	var to_remove: Array[MeshInstance3D] = []
+	for c in traffic_cones:
+		if not is_instance_valid(c):
+			to_remove.append(c)
+			continue
+		var spawn_t: float = c.get_meta("spawn_t") as float
+		# Recycle cones older than 60s
+		if spawn_t > 0.0 and now - spawn_t > 60.0:
+			c.visible = false
+			to_remove.append(c)
+			continue
+		# Pulsing emission: 0.6..1.8 energy at CONE_PULSE_HZ
+		var mat: StandardMaterial3D = c.material_override
+		if mat:
+			var pulse := 0.6 + 0.6 * abs(sin(now * TAU * CONE_PULSE_HZ))
+			mat.emission_energy_multiplier = pulse
+	for c in to_remove:
+		traffic_cones.erase(c)
+
+# Spawn a ring of 3-5 cones around a world position (used for random events
+# that block roads — mugging, car theft, fire all get a roadblock).
+func _spawn_cone_ring(pos: Vector3, count: int = 4) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(pos.x * 1000 + pos.z)
+	for i in count:
+		var angle: float = rng.randf_range(0.0, TAU)
+		var dist: float = rng.randf_range(1.0, CONE_SPAWN_RADIUS)
+		var offset := Vector3(cos(angle) * dist, 0.0, sin(angle) * dist)
+		var c := _place_cone(pos + offset)
+		if c:
+			traffic_cones.append(c)
+
+# Spawn a police roadblock: 4 cones in a line across the nearest road to the
+# player. Called when wanted >= 3 so police can set up barriers during chases.
+func _spawn_police_roadblock() -> void:
+	# Find the nearest traffic path to the player
+	var best_path: Array = []
+	var best_d: float = 9999.0
+	for path in traffic_paths:
+		var mid := path[path.size() / 2]
+		var d := player_pos.distance_to(mid)
+		if d < best_d:
+			best_d = d
+			best_path = path
+	if best_path.is_empty():
+		return
+	# Place 4 cones evenly along the middle 60% of the path
+	var start_idx := int(best_path.size() * 0.2)
+	var end_idx := int(best_path.size() * 0.8)
+	if end_idx <= start_idx:
+		return
+	for i in range(4):
+		var idx := start_idx + (end_idx - start_idx) * i / 3
+		var c := _place_cone(best_path[idx])
+		if c:
+			traffic_cones.append(c)
 
 
 func _update_traffic(delta: float) -> void:
@@ -1555,7 +1813,7 @@ func _enter_building(x: int, z: int) -> void:
 	# Check if this is the bank
 	if Vector3(_wx(x * CELL), 0, _wz(z * CELL)).distance_to(bank_pos) < 1.0 and wanted_level < 3:
 		# Walk in clean and you can start the heist
-		_announce("BANK - This is a clean visit. Press H to plan heist.", Color(0.6, 0.9, 0.6))
+		_announce("BANK - just browsing. The heist comes later in the mission chain.", Color(0.6, 0.9, 0.6))
 	interior_view = true
 	interior_root = Node3D.new()
 	add_child(interior_root)
@@ -1795,6 +2053,7 @@ func _build_police() -> void:
 
 
 var _police_siren_cooldown: float = 0.0
+var _police_roadblock_active: bool = false  # prevent respawning roadblocks every frame
 
 func _update_police(delta: float) -> void:
 	# Chase player when wanted > 0; otherwise return to station
@@ -1826,6 +2085,16 @@ func _update_police(delta: float) -> void:
 			var phase: float = fmod(Time.get_ticks_msec() / 200.0, 2.0)
 			var flash_col: Color = Color(0.9, 0.2, 0.2) if phase < 1.0 else Color(0.2, 0.4, 0.9)
 			p["light"].material_override.emission = flash_col
+	# Police roadblock: at wanted >= 3, spawn cones across the nearest road
+	# to the player so police can set up barriers during chases.
+	if wanted_level >= 3 and not _police_roadblock_active:
+		_spawn_police_roadblock()
+		_police_roadblock_active = true
+		_announce("POLICE ROADBLOCK - find another route!", Color(1, 0.3, 0.3))
+	elif wanted_level < 3 and _police_roadblock_active:
+		# Clear the roadblock when wanted drops
+		_clear_all_cones()
+		_police_roadblock_active = false
 # Police siren cooldown (function level)
 	_police_siren_cooldown -= delta
 	if wanted_level > 0 and _police_siren_cooldown <= 0.0:
@@ -1857,6 +2126,12 @@ func _update_police(delta: float) -> void:
 
 
 func _busted() -> void:
+	# Getting caught mid-escape loses the heist (and the loot) - without this
+	# the wanted reset below would count as a successful getaway.
+	if current_mission.get("id") == "the_big_heist" and current_mission.get("heist_stage") == "escape" and current_mission.get("status") == "active":
+		sim_budget -= 5000
+		_announce("BUSTED! Heist failed, loot confiscated.", Color(1, 0.4, 0.4))
+		_fail_current_mission()
 	# Reset wanted, dock budget, take player to nearest cell (the police station)
 	wanted_level = 0
 	var dock: int = 200
@@ -1885,8 +2160,27 @@ func _add_wanted(amount: int) -> void:
 
 
 func _update_wanted(delta: float) -> void:
-	if wanted_level == 0:
-		return
+	if wanted_level > 0:
+		_decay_wanted(delta)
+	_update_player_status(delta)
+	_update_announcement(delta)
+	_update_context_hint()
+	_update_damage_flash(delta)
+	total_play_time += delta
+	_update_random_events(delta)
+	if not game_complete and _story_missions_done() >= MISSION_CHAIN.size():
+		_show_game_complete()
+
+
+func _story_missions_done() -> int:
+	var n: int = 0
+	for id in MISSION_CHAIN:
+		if completed_missions.has(id):
+			n += 1
+	return n
+
+
+func _decay_wanted(delta: float) -> void:
 	# Inside building: lose wanted 2x faster
 	var decay: float = delta
 	if interior_view:
@@ -1904,10 +2198,10 @@ func _update_wanted(delta: float) -> void:
 			# Mission failed
 			stats_missions_failed += 1
 			_announce("MISSION FAILED: " + str(current_mission.get("name", current_mission.get("title", "?"))) + " - Wanted too high!", Color(1, 0.4, 0.4))
-			_next_mission()
-	_update_player_status(delta)
-	_update_announcement(delta)
-	_update_context_hint()
+			_fail_current_mission()
+
+
+func _update_damage_flash(delta: float) -> void:
 	if damage_flash > 0.0:
 		damage_flash -= delta
 		if damage_flash_cl == null:
@@ -1925,10 +2219,6 @@ func _update_wanted(delta: float) -> void:
 		if damage_flash <= 0.0 and damage_flash_cl:
 			damage_flash_cl.queue_free()
 			damage_flash_cl = null
-	total_play_time += delta
-	_update_random_events(delta)
-	if not game_complete and completed_missions.size() >= missions.size() and missions.size() > 0:
-		_show_game_complete()
 
 
 
@@ -1946,7 +2236,7 @@ func _update_player_status(delta: float) -> void:
 		if player:
 			player.visible = true
 	# Clamp health, kill if zero
-	if player_health <= 0:
+	if player_health <= 0 and not game_over:
 		_on_player_death()
 	# Ammo reload at home? No, buy at store.
 
@@ -1988,6 +2278,24 @@ func _show_game_over() -> void:
 	r.add_theme_font_size_override("font_size", 24)
 	r.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6))
 	game_over_cl.add_child(r)
+
+
+func _respawn_after_game_over() -> void:
+	game_over = false
+	if game_over_cl:
+		game_over_cl.queue_free()
+		game_over_cl = null
+	sim_budget -= 500
+	total_respawns += 1
+	player_health = player_max_health
+	player_invulnerable = 3.0
+	wanted_level = 0
+	player_pos = Vector3(_wx(8 * CELL), 0.7, _wz(12 * CELL))
+	if player:
+		player.position = player_pos
+	if vehicle_in:
+		_exit_vehicle()
+	_announce("RESPAWNED AT HOSPITAL (-$500)", Color(0.7, 0.9, 0.7))
 
 
 func _on_player_death() -> void:
@@ -2316,11 +2624,13 @@ func _setup_missions() -> void:
 	}
 	missions.append(m1)
 	current_mission = m1
-	_build_mission_overlay()
+	if mission_overlay == null:
+		_build_mission_overlay()
+	_refresh_mission_overlay()
 
 
 func _build_stats_overlay() -> void:
-	var stats_cl := CanvasLayer.new()
+	stats_cl = CanvasLayer.new()
 	stats_cl.layer = 6
 	add_child(stats_cl)
 	var sgt_bg := ColorRect.new()
@@ -2335,7 +2645,7 @@ func _build_stats_overlay() -> void:
 	sgt_title.add_theme_color_override("font_color", Color(1, 1, 0.4))
 	stats_cl.add_child(sgt_title)
 	var sgt_label := Label.new()
-	sgt_label.name = "StatsLabel"
+	stats_label = sgt_label
 	sgt_label.position = Vector2(440, 250)
 	sgt_label.add_theme_font_size_override("font_size", 16)
 	sgt_label.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
@@ -2344,10 +2654,9 @@ func _build_stats_overlay() -> void:
 
 
 func _refresh_stats_overlay() -> void:
-	var sgt_label := get_node_or_null("StatsLabel")
-	if sgt_label == null:
+	if stats_label == null:
 		return
-	sgt_label.text = "Day %d\nPopulation: %d\nBudget: $%s\nHP: %d/100\n\nKills: %d\nCars smashed: %d\nMoney earned: $%d\nBullets fired: %d\nDistance walked: %.0f m\nMissions done: %d/3" % [
+	stats_label.text = "Day %d\nPopulation: %d\nBudget: $%s\nHP: %d/100\n\nKills: %d\nCars smashed: %d\nMoney earned: $%d\nBullets fired: %d\nDistance walked: %.0f m\nMissions done: %d/%d" % [
 		sim_day_count,
 		sim_population,
 		_abs_budget_fmt(),
@@ -2357,7 +2666,8 @@ func _refresh_stats_overlay() -> void:
 		stats_money_earned,
 		stats_bullets_fired,
 		stats_distance_walked,
-		completed_missions.size(),
+		_story_missions_done(),
+		MISSION_CHAIN.size(),
 	]
 
 
@@ -2401,7 +2711,7 @@ func _refresh_mission_overlay() -> void:
 	elif current_mission["status"] == "complete":
 		mission_objective.text = "MISSION COMPLETE! Press M for next mission."
 	elif current_mission["status"] == "failed":
-		mission_objective.text = "Mission failed."
+		mission_objective.text = "Mission failed. Press M for the next mission."
 
 
 func _update_mission(delta: float) -> void:
@@ -2413,6 +2723,9 @@ func _update_mission(delta: float) -> void:
 	if current_mission.get("id") == "pizza_delivery":
 		_update_delivery_mission(delta)
 		return
+	# Heist and money-bag missions have their own completion logic
+	if not current_mission.has("target_pos"):
+		return
 	var d: float = player_pos.distance_to(current_mission["target_pos"])
 	if d < current_mission["target_radius"]:
 		_complete_mission()
@@ -2423,7 +2736,24 @@ func _complete_mission() -> void:
 	current_mission["status"] = "complete"
 	var reward: int = current_mission.get("reward", 0)
 	sim_budget += reward
-	completed_missions.append(current_mission["id"])
+	stats_money_earned += reward
+	if not completed_missions.has(current_mission["id"]):
+		completed_missions.append(current_mission["id"])
+	_announce("MISSION COMPLETE: %s  +$%d  (press M for the next one)" % [current_mission.get("name", "?"), reward], Color(0.4, 1.0, 0.4))
+	_refresh_mission_overlay()
+
+
+# Mark the current mission failed. It still counts as "done" for the chain
+# so the player is never stuck; they just miss the reward.
+func _fail_current_mission() -> void:
+	if current_mission.is_empty():
+		return
+	if current_mission.get("id") == "pizza_delivery":
+		_fail_delivery_mission(true)
+		return
+	current_mission["status"] = "failed"
+	if not completed_missions.has(current_mission["id"]):
+		completed_missions.append(current_mission["id"])
 	_refresh_mission_overlay()
 
 
@@ -2463,42 +2793,26 @@ func _next_mission_2() -> void:
 # Pressed M: advance to the next mission.  Handles both forward-progress
 # (active -> complete -> next) and the "all done" end state.
 func _advance_mission() -> void:
-	# If the current mission is still in flight, treat M as "complete it now"
-	# so the player can skip stuck missions (e.g. collect_bonus's missing progress).
+	# M while a mission is running skips it (no reward) so nobody gets stuck.
 	if not current_mission.is_empty() and current_mission.get("status") == "active":
-		# Special case: if a delivery is in progress, just give up — the
-		# pickup has to physically happen.
-		if current_mission.get("id") == "pizza_delivery":
-			_fail_delivery_mission(true)
+		_announce("MISSION SKIPPED: " + str(current_mission.get("name", "?")), Color(0.7, 0.7, 0.7))
+		_fail_current_mission()
+	for id in MISSION_CHAIN:
+		if not completed_missions.has(id):
+			_start_mission(id)
 			return
-		_complete_mission()
-		# After completing, drop into the "no current mission" branch below
-		# so the next mission in the chain auto-starts.
-		current_mission = {}
-	# If the current mission is complete, pop to the next in the queue.
-	if not current_mission.is_empty() and current_mission.get("status") == "complete":
-		current_mission = {}
-	# No current mission -> start the next chain mission.  M2/M3 only auto-queue
-	# if their setup functions are called; we always have the delivery mission
-	# available, so chain straight to it for predictable behavior.
-	if current_mission.is_empty():
-		# Try the standard M2 queue first, fall back to delivery if it's missing.
-		if not (completed_missions.has("chase_the_bank_robber")) and completed_missions.has("bust_the_burglar"):
-			_next_mission()
-			return
-		if not (completed_missions.has("collect_bonus")) and completed_missions.has("chase_the_bank_robber"):
-			_next_mission_2()
-			return
-		if not (completed_missions.has("pizza_delivery")) and completed_missions.has("collect_bonus"):
-			_next_mission_3()
-			return
-		# Last-resort: if M1 is missing, re-queue it.
-		if not (completed_missions.has("bust_the_burglar")):
-			_setup_missions()
-			return
-		# All standard missions cleared and delivery already done -> start a
-		# fresh delivery run for replay value.
-		_next_mission_3()
+	# Story finished: pizza runs stay available for replay value.
+	_next_mission_3()
+
+
+func _start_mission(id: String) -> void:
+	match id:
+		"bust_the_burglar": _setup_missions()
+		"chase_the_bank_robber": _next_mission()
+		"collect_bonus": _next_mission_2()
+		"the_big_heist": _start_heist()
+		"pizza_delivery": _next_mission_3()
+	_announce("NEW MISSION: " + str(current_mission.get("name", "?")), Color(0.95, 0.85, 0.30))
 
 
 # Mission 5: "Pizza Run".  Build a pizza shop, a yellow box on the counter,
@@ -2528,6 +2842,9 @@ func _next_mission_3() -> void:
 	while attempts < 50:
 		var tx: int = rng.randi_range(2, GRID - 3)
 		var tz: int = rng.randi_range(2, GRID - 6)  # avoid southern river strip
+		# Snap onto a road so the drop-off is always reachable on foot
+		if not _is_road(tx, tz):
+			tx = clampi(int(round(float(tx) / ROAD_EVERY)) * ROAD_EVERY, 0, GRID - ROAD_EVERY)
 		if tx == PIZZA_SHOP_GRID.x and tz == PIZZA_SHOP_GRID.y:
 			attempts += 1
 			continue
@@ -2718,6 +3035,10 @@ func _build_pickups() -> void:
 		var z: int = rng.randi_range(2, GRID - 2)
 		if _is_water(x, z):
 			continue
+		# Snap onto a road: the player can't walk through buildings, so a
+		# pickup inside a building lot could never be collected.
+		if not _is_road(x, z):
+			x = clampi(int(round(float(x) / ROAD_EVERY)) * ROAD_EVERY, 0, GRID - ROAD_EVERY)
 		var is_money: bool = rng.randf() < 0.7
 		var pickup := MeshInstance3D.new()
 		var bm := BoxMesh.new()
@@ -2759,6 +3080,11 @@ func _update_pickups(delta: float) -> void:
 			if p2["type"] == "money":
 				sim_budget += p2["value"]
 				_play_collect_pickup_sound()
+				if current_mission.get("id") == "collect_bonus" and current_mission.get("status") == "active":
+					current_mission["progress"] = int(current_mission.get("progress", 0)) + 1
+					_refresh_mission_overlay()
+					if current_mission["progress"] >= int(current_mission.get("target_count", 5)):
+						_complete_mission()
 			else:
 				player_health = min(100, player_health + p2["value"])
 				_play_collect_pickup_sound()
@@ -2924,13 +3250,17 @@ func _update_bullets(delta: float) -> void:
 # Bank location (corner of map)
 var bank_pos: Vector3 = Vector3(_wx(20 * CELL), 0.7, _wz(20 * CELL))
 
+var heist_bank_mesh: MeshInstance3D
+
 func _start_heist() -> void:
+	if heist_bank_mesh and is_instance_valid(heist_bank_mesh):
+		heist_bank_mesh.queue_free()
 	# Mission 4: bank heist! Steal \$5000, escape police for 30s
 	var m4 := {
 		"id": "the_big_heist",
 		"name": "The Big Heist",
 		"brief": "Rob the bank at the corner of 5th and Main, then escape the police for 30 seconds.",
-		"objective": "Press E at the bank (red building) to rob it",
+		"objective": "Walk up to the bank (big red building) to rob it",
 		"status": "active",
 		"heist_stage": "rob",  # rob -> escape -> complete
 		"heist_started_at": -1.0,
@@ -2953,6 +3283,7 @@ func _start_heist() -> void:
 	bank.position = m4["heist_target"] + Vector3(0, 2.5, 0)
 	bank.name = "Bank"
 	add_child(bank)
+	heist_bank_mesh = bank
 	_refresh_mission_overlay()
 
 
@@ -2977,9 +3308,9 @@ func _update_heist(delta: float) -> void:
 			for i in range(3):
 				_spawn_police_unit()
 	elif current_mission.get("heist_stage") == "escape":
-			# Mission completes after 30 seconds without busted
-			if wanted_level == 0:
-				_complete_mission()
+		# Mission completes once the heat dies down (wanted back to 0)
+		if wanted_level == 0:
+			_complete_mission()
 
 
 func _spawn_police_unit() -> void:
@@ -3112,6 +3443,11 @@ func _restart_game() -> void:
 		final_cl.queue_free()
 		final_cl = null
 	# Reset missions
+	missions.clear()
+	_clean_delivery_mission()
+	if heist_bank_mesh and is_instance_valid(heist_bank_mesh):
+		heist_bank_mesh.queue_free()
+	heist_bank_mesh = null
 	_setup_missions()
 	# Reset player position
 	player_pos = Vector3(_wx(8 * CELL), 0.7, _wz(8 * CELL))
@@ -3123,6 +3459,9 @@ func _restart_game() -> void:
 		if p.mesh:
 			p.mesh.queue_free()
 	pickups.clear()
+	_build_pickups()
+	_police_roadblock_active = false
+	_clear_all_cones()
 	_announce("NEW GAME STARTED", Color(0.4, 1.0, 0.4))
 
 func _build_main_menu() -> void:
@@ -3153,18 +3492,20 @@ func _build_main_menu() -> void:
 	inst.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
 	inst.text = """Build your city. Walk its roads. Commit crimes. Make the cash.
 
-1/2/3 zones  4 roads  5 bulldoze  Click to apply
-WASD walk  F enter car  Space shoot  E enter building
-+/- sim speed  T top-down  C/V camera
-M next mission  H hide help  TAB stats  B store  F5/F9 save/load
+1/2/3 zones  4 roads  5 bulldoze  6/7 power  Click to apply
+WASD / arrows walk or drive   F enter/exit car   Space shoot   E enter building
++/- sim speed  T top-down  C/V camera  N weather  [ ] tax
+M next mission  H hide help  TAB stats  B store  P pause  F5/F9 save/load
 
-DIFFICULTY: press 1 = EASY, 2 = NORMAL, 3 = HARD
-Press ENTER / click to start (NORMAL)."""
+DIFFICULTY: press 1 = EASY, 2 = NORMAL, 3 = HARD"""
 	menu_cl.add_child(inst)
 	# Footer
 	var footer := Label.new()
-	footer.text = "Press ENTER or click to start"
-	footer.position = Vector2(440, 670)
+	menu_footer = footer
+	footer.text = "Difficulty: NORMAL  -  press ENTER or click to start"
+	footer.position = Vector2(0, 670)
+	footer.size = Vector2(1280, 40)
+	footer.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	footer.add_theme_font_size_override("font_size", 22)
 	footer.add_theme_color_override("font_color", Color(0.6, 0.9, 0.6))
 	menu_cl.add_child(footer)
@@ -3174,6 +3515,7 @@ func _dismiss_menu() -> void:
 	if menu_cl:
 		menu_cl.queue_free()
 		menu_cl = null
+		menu_footer = null
 	_refresh_camera()
 
 
@@ -3213,6 +3555,9 @@ func _spawn_random_event() -> void:
 	event_timer = 0.0
 	_announce("EVENT: " + t.to_upper().replace("_", " ") + " - Investigate!", Color(1, 0.6, 0.4))
 	_build_event_marker(pos, t)
+	# Spawn traffic cones around the event site — every random event gets a
+	# roadblock so the city feels like it's responding to the incident.
+	_spawn_cone_ring(pos, 4)
 
 
 func _build_event_marker(pos: Vector3, t: String) -> void:
@@ -3274,6 +3619,8 @@ func _clear_event() -> void:
 		for c in event_cl.get_children():
 			c.queue_free()
 	event_timer = 0.0
+	# Clear the roadblock cones that spawned with this event
+	_clear_all_cones()
 
 func _current_mission_idx() -> int:
 	for i in range(missions.size()):
@@ -3505,7 +3852,7 @@ func _build_hills() -> void:
 # and animated downward, recycled to the top when they reach y<=0. Storm
 # state adds wind drift on the X axis. Weather_ambient_mod feeds into
 # _apply_time() to dim ambient + greys the daytime sky. Manual cycle via
-# W key. Cmdline flags: --rain / --storm force a starting state.
+# N key. Cmdline flags: --rain / --storm force a starting state.
 
 const RAIN_DROP_COUNT := 240
 const RAIN_AREA_HALF := 36.0  # spread a little beyond HALF=32 so drops hit hills too
@@ -3554,13 +3901,13 @@ func _build_weather() -> void:
 		rain_root.add_child(drop)
 		rain_drops.append(drop)
 	rain_root.visible = false  # hidden when state=clear
-	# HUD badge (top-left, just below the wanted meter area) — create FIRST so
+	# HUD badge (top-left, just below the wanted meter) — create FIRST so
 	# _apply_weather_mod can toggle its visibility correctly on the initial state.
 	var cl := CanvasLayer.new()
 	cl.layer = 5
 	add_child(cl)
 	weather_label = Label.new()
-	weather_label.position = Vector2(12, 44)
+	weather_label.position = Vector2(12, 86)
 	weather_label.add_theme_font_size_override("font_size", 16)
 	weather_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.4))
 	cl.add_child(weather_label)
@@ -3625,10 +3972,8 @@ func _update_weather(delta: float) -> void:
 			drop.position.x = randf_range(-RAIN_AREA_HALF, RAIN_AREA_HALF)
 			drop.position.z = randf_range(-RAIN_AREA_HALF, RAIN_AREA_HALF)
 
-
-
 func _cycle_weather() -> void:
-	# Manual override (W key) — reset timer so it doesn't auto-cycle right after
+	# Manual override (N key) — reset timer so it doesn't auto-cycle right after
 	weather_state = (weather_state + 1) % 3
 	weather_timer = 0.0
 	_apply_weather_mod()

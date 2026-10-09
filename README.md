@@ -86,7 +86,8 @@ Press **M** to advance between missions. Each mission has its own wanted thresho
 - **Vehicle lights** — Traffic, parked, and police cars get 2 white headlights at the front and 2 red tail lights at the rear. They auto-toggle with the day/night cycle, so the city has moving points of light at night.
 - **Dynamic weather** — 3 states (CLEAR / RAIN / STORM) that auto-cycle every 90 sim-seconds. Rain = 240 falling blue streak particles + greyer overcast sky + dimmer ambient. Storm = rain + wind drift on rain + noticeably darker. Press N to cycle manually. Cmdline: `--rain` or `--storm` to force a starting state. Saved/loaded.
 - **City health warnings** — Banners surface SimCity failure modes so the simulation has a visible feedback loop: BUDGET CRISIS (3+ days deficit, red), POPULATION EXODUS (down 15% from peak, orange), NEED WORKERS (industry outpacing residential, yellow), UNEMPLOYMENT (residential without jobs, blue). Each warning names the cause and the fix.
-- **Random events** — every 20 seconds a mugging/car-theft/fire spawns. Get within 4m to resolve for $300.
+- **Random events** — every 20 seconds a mugging/car-theft/fire spawns. Get within 4m to resolve for $300. Each event spawns a ring of **traffic cones** (orange, pulsing at 3 Hz) around the site — the city responds with a roadblock.
+- **Traffic cones** — 20 pre-built orange cones (emissive, pulse at night). Spawn at random events as roadblocks, and police set up a roadblock (4 cones across the nearest road) when wanted ≥ 3. Cones auto-clear when the event is resolved or wanted drops. Recycle after 60s.
 - **Store** — Health Pack ($200), Ammo Crate ($150), Bail Bond ($500), Smog Upgrade ($1000).
 - **Stats** — kills, money, distance walked, missions done.
 - **Save/Load** — F5 saves full game state (version 3), F9 loads.

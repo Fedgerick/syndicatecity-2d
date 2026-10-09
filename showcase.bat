@@ -10,7 +10,7 @@ REM ==============================================================
 setlocal
 set "PROJECT=%~dp0"
 set "ENGINE=C:\Users\russe\tools\godot-4.5\Godot_v4.5-stable_win64_console.exe"
-set "OUTDIR=%LOCALAPPDATA%\Godot\app_userdata\SyndicateCity 2D"
+set "OUTDIR=%APPDATA%\Godot\app_userdata\SyndicateCity 2D"
 
 if not exist "%ENGINE%" (
   echo   [X] Godot 4.5 not found at %ENGINE%
@@ -28,22 +28,22 @@ echo.
 
 REM View 1: noon, isometric
 echo   [1/4] noon, isometric...
-"%ENGINE%" --path "%PROJECT%" --rendering-method gl_compatibility --resolution 1280x720 -- --capture --time=0.5 > nul 2>&1
+"%ENGINE%" --path "%PROJECT%" --rendering-method gl_compatibility --resolution 1280x720 -- --capture --start --time=0.5 > nul 2>&1
 copy /y "%OUTDIR%\capture.png" "%PROJECT%\screenshots\showcase_noon.png" > nul
 
 REM View 2: dusk, isometric
 echo   [2/4] dusk, isometric...
-"%ENGINE%" --path "%PROJECT%" --rendering-method gl_compatibility --resolution 1280x720 -- --capture --time=0.75 > nul 2>&1
+"%ENGINE%" --path "%PROJECT%" --rendering-method gl_compatibility --resolution 1280x720 -- --capture --start --time=0.75 > nul 2>&1
 copy /y "%OUTDIR%\capture.png" "%PROJECT%\screenshots\showcase_dusk.png" > nul
 
 REM View 3: night, isometric
 echo   [3/4] night, isometric...
-"%ENGINE%" --path "%PROJECT%" --rendering-method gl_compatibility --resolution 1280x720 -- --capture --time=0.15 > nul 2>&1
+"%ENGINE%" --path "%PROJECT%" --rendering-method gl_compatibility --resolution 1280x720 -- --capture --start --time=0.15 > nul 2>&1
 copy /y "%OUTDIR%\capture.png" "%PROJECT%\screenshots\showcase_night.png" > nul
 
 REM View 4: topdown
 echo   [4/4] topdown, day...
-"%ENGINE%" --path "%PROJECT%" --rendering-method gl_compatibility --resolution 1280x720 -- --capture --time=0.5 --topdown > nul 2>&1
+"%ENGINE%" --path "%PROJECT%" --rendering-method gl_compatibility --resolution 1280x720 -- --capture --start --time=0.5 --topdown > nul 2>&1
 copy /y "%OUTDIR%\capture.png" "%PROJECT%\screenshots\showcase_topdown.png" > nul
 
 echo.
