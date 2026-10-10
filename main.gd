@@ -59,9 +59,10 @@ var weather_timer: float = 0.0  # counts up; cycles state at threshold
 var weather_state_duration: float = 90.0  # seconds per state (sim time scaled)
 var rain_drops: Array[MeshInstance3D] = []  # pre-built rain particles, recycled
 var rain_root: Node3D
-var weather_label: Label
-var weather_ambient_mod: float = 0.0  # 0=clear, -0.2=rain, -0.35=storm
-var sim_unlocked: Array[String] = ["Basic Zone"]
+var day_counter_label: Label
+	var weather_label: Label
+	var weather_ambient_mod: float = 0.0  # 0=clear, -0.2=rain, -0.35=storm
+	var sim_unlocked: Array[String] = ["Basic Zone"]
 var missions: Array = []  # active missions
 var completed_missions: Array = []
 var stats_npcs_killed: int = 0
@@ -1518,6 +1519,7 @@ func _build_hud() -> void:
 	_refresh_wanted_label()
 	_update_minimap()
 	_build_health_banner()
+	_build_day_counter()
 
 
 
@@ -1595,6 +1597,28 @@ func _refresh_demand_bars() -> void:
 		fill.position = Vector2(base_x + 16, base_y + i * (bar_h + 2))
 		fill.size = Vector2(bar_w * (vals[i] / 100.0), bar_h)
 		demand_bars_root.add_child(fill)
+			# Day counter: show at top of demand bars area
+			if day_counter_label == null:
+				var day_label := Label.new()
+				day_counter_label = day_label
+				day_label.text = "Day " + str(sim_day_count)
+				day_label.add_theme_font_size_override("font_size", 14)
+				day_label.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
+				day_label.add_theme_constant_override("outline_size", 1)
+				# Position it near the demand bars (same Y as demand bars, to the left of them)
+				day_label.position = Vector2(580, 8)
+				day_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+				if demand_bars_root:
+					demand_bars_root.add_child(day_label)
+				else:
+					# If demand bars don't exist yet, attach to the HUD canvas layer for now
+					var hud_cl := get_node_or_null("CanvasLayer") as CanvasLayer
+					if hud_cl:
+						hud_cl.add_child(day_label)
+			else:
+				# Update the day text if label exists
+				if day_counter_label:
+					day_counter_label.text = "Day " + str(sim_day_count)
 
 func _build_context_hint() -> void:
 	var cl := CanvasLayer.new()
@@ -1658,8 +1682,11 @@ func _refresh_hud() -> void:
 			sim_population,
 			int(sim_residential_tax_rate * 100.0),
 			placed_buildings.size()]
-	if demand_bars_root != null:
-		_refresh_demand_bars()
+		if demand_bars_root != null:
+				_refresh_demand_bars()
+				# Update day counter label if it exists
+				if day_counter_label:
+					day_counter_label.text = "Day " + str(sim_day_count)
 var traffic_dots: Array[MeshInstance3D] = []
 var traffic_paths: Array = []  # each = Array of Vector3 world positions
 # Traffic cones: dynamic roadblocks that spawn at events + police roadblocks
