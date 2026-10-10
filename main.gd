@@ -125,6 +125,12 @@ const MISSION_CHAIN: Array[String] = ["bust_the_burglar", "chase_the_bank_robber
 var damage_flash: float = 0.0
 var damage_flash_cl: CanvasLayer  # 0=easy, 1=normal, 2=hard
 var easy_mode: bool = false
+
+## Background ambient music system
+var bgm_player: AudioStreamPlayer3D
+var bgm_volume: float = 0.5
+var bgm_weather_mod: float = 1.0  # 1.0=clear, 0.7=rain, 0.5=storm
+var bgm_enabled: bool = true
 var menu_cl: CanvasLayer
 var menu_label: Label
 var buy_menu_open: bool = false
@@ -160,6 +166,12 @@ var tool_cost_coal: int = 250
 var tool_cost_wind: int = 200
 var controls_overlay: CanvasLayer
 var controls_label: Label
+var dialogue_active: bool = false
+var dialogue_text: String = ""
+var dialogue_npc_index: int = -1
+var dialogue_overlay: CanvasLayer
+var dialogue_label: Label
+var side_quests: Node  # side_quests.gd — NPC-offered side quests
 
 
 func _ready() -> void:
@@ -217,6 +229,9 @@ func _ready() -> void:
 	_build_context_hint()
 	_build_main_menu()
 	_build_buy_menu()
+	# Side-quest system: NPCs offer quests on dialogue, player accepts with M
+	side_quests = load("res://side_quests.gd").new()
+	add_child(side_quests)
 	if _auto_start:
 		print("AUTOSTART: dismissing menu")
 		_dismiss_menu()
@@ -278,11 +293,13 @@ func _process(delta: float) -> void:
 	_update_heist(delta)
 	_update_wanted(delta)
 	_update_npcs(delta)
+	_update_dialogue(delta)
 	_update_pickups(delta)
 	_update_bullets(delta)
 	_update_player(delta)
 	_update_vehicle(delta)
 	_update_health_banner(delta)
+	_update_bgm(delta)
 	# Growth: every 0.5s, randomly bump a built cell to a higher density
 	growth_accum += delta
 	if growth_accum > 0.5:
@@ -488,6 +505,79 @@ func _update_health_banner(delta: float) -> void:
 		health_warning_label.modulate = Color(1, 1, 1, a)
 
 
+func _update_bgm(delta: float) -> void:
+	if not bgm_enabled:
+		return
+	# Update weather modulation
+	if weather_state == 0:  # CLEAR
+		bgm_weather_mod = lerp(1.0, 0.7, delta / 90.0)  # smooth transition over day
+	elif weather_state == 1:  # RAIN
+		bgm_weather_mod = 0.7
+	elif weather_state == 2:  # STORM
+		bgm_weather_mod = 0.5
+	bgm_player.volume_db = linear_to_db(bgm_volume * bgm_weather_mod)
+	_refresh_bgm()
+
+
+func _refresh_bgm() -> void:
+	# Set BGM track based on weather and time of day
+	if bgm_player.stream != null:
+		bgm_player.stop()
+	bgm_player.stream.queue_free()
+	bgm_player.stream = null
+
+
+# Define ambient music tracks
+var bgm_clearsong := null  # reference to AudioStream
+var bgm_rainsong := null
+var bgm_stormsong := null
+
+# Initialize audio streams
+func _init_bgm_streams() -> void:
+	var s := AudioStreamPlayer3D.new()  # just checking
+	# Clear track: warm pad with subtle pulse
+	var clear_stream := AudioStream.new()
+	clear_stream.bus = 2  # music bus
+	clear_stream.loop = true
+	# Simple sine-based ambient
+	var sample_count: int = int(22050 * 5.0)  # 5 seconds
+	var phase: float = 0.0
+	var step: float = 0.1 / 22050.0  # 0.1 Hz pulse
+	for i in range(sample_count):
+		var s: float = sin(phase) * 0.1
+		phase += step
+		clear_stream.push_frame(Vector2(s, s))
+	clear_stream.buffer_length = 0.5
+	bgm_clearsong = clear_stream
+
+	# Rain track: slower, darker
+	var rain_stream := AudioStream.new()
+	rain_stream.bus = 2
+	rain_stream.loop = true
+	phase = 0.0
+	step = 0.05 / 22050.0
+	for i in range(sample_count):
+		var s: float = sin(phase) * 0.08 * 0.7
+		phase += step
+		rain_stream.push_frame(Vector2(s, s))
+	rain_stream.buffer_length = 0.5
+	bgm_rainsong = rain_stream
+
+	# Storm track: very dark, howling
+	var storm_stream := AudioStream.new()
+	storm_stream.bus = 2
+	storm_stream.loop = true
+	phase = 0.0
+	step = 0.02 / 22050.0
+	for i in range(sample_count):
+		var s: float = sin(phase) * 0.05 * 0.5 + sin(phase * 5) * 0.03 * 0.3
+		phase += step
+		storm_stream.push_frame(Vector2(s, s))
+	storm_stream.buffer_length = 0.5
+	bgm_stormsong = storm_stream
+
+_refresh_bgm()
+
 func _grow_random_cell() -> void:
 	if placed_buildings.is_empty():
 		return
@@ -581,6 +671,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				_announce("TAX RATE: %d%%" % int(sim_residential_tax_rate * 100.0),
 					Color(0.5, 0.85, 0.5) if sim_residential_tax_rate <= 0.10 else Color(1.0, 0.7, 0.3))
 			KEY_H: _toggle_controls()
+			KEY_D: _try_dialogue()
 			KEY_C:
 				cam_thirdperson = true
 				_refresh_player_camera()
@@ -1536,6 +1627,11 @@ func _update_context_hint() -> void:
 		hint += "  | WANTED " + str(wanted_level) + " STARS - run!"
 	if not event_active.is_empty():
 		hint += "  | EVENT: walk to red marker (" + str(int(event_active.get("life", 0))) + "s)"
+	# Show "Press D to talk" when an NPC is within 2.5m
+	for n in npcs:
+		if player_pos.distance_to(n["mesh"].position) < 2.5:
+			hint += "  | D: Talk to " + n["dialogue"].get("greeting", "NPC")
+			break
 	if buy_menu_open:
 		hint = "STORE - press 1/2/3/4 to buy, 0 to close"
 	context_hint_label.text = hint
@@ -1763,37 +1859,206 @@ func _build_npcs() -> void:
 			"t": 0.0,
 			"dir": 1,
 			"speed": rng.randf_range(1.2, 2.2),
+		"dialogue": _npc_dialogue(n),
+		"dialogue_cooldown": 0.0,
+		"quest": _npc_quest(n),
 		})
+
+
+# Helper function for finding paths in 3D space (simplified A* algorithm)
+func _find_path_3d(start_pos: Vector3, end_pos: Vector3) -> Array[Vector3]:
+	# Simple pathfinding: just line from start to end for now
+	var path: Array[Vector3] = []
+	path.append(start_pos)
+	
+	var steps: int = int(start_pos.distance_to(end_pos) / (CELL * 0.5))
+	for i in range(1, steps + 1):
+		var t: float = float(i) / float(steps)
+		var pos := start_pos.lerp(end_pos, t)
+		path.append(pos)
+	
+	path.append(end_pos)
+	return path
 
 
 func _update_npcs(delta: float) -> void:
 	# At night, NPCs slow down / head home
 	var is_day: bool = _t > 0.3 and _t < 0.75
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 99
 	for n in npcs:
-		# Faster during day, slower at night
-		n["speed"] = lerpf(0.3, 1.0, 1.0 if is_day else 0.2)
-		var t: float = n["t"]
-		var day_mult: float = 1.0 if (_t > 0.3 and _t < 0.75) else 0.35
-		t += delta * n["speed"] * n["dir"] * day_mult / (n["path"][1] - n["path"][0]).length()
-		if t > 1.0:
-			t = 1.0
-			n["dir"] = -1
-		elif t < 0.0:
-			t = 0.0
-			n["dir"] = 1
-		n["t"] = t
-		var pos: Vector3 = n["path"][0].lerp(n["path"][1], t)
-		pos.y = 0.7
-		n["mesh"].position = pos
-		# Face direction
-		var fwd: Vector3 = (n["path"][1] - n["path"][0]).normalized() * n["dir"]
-		if fwd.length() > 0.01:
-			n["mesh"].rotation.y = atan2(fwd.x, fwd.z)
+		# GTA behavior: NPCs react to wanted level
+		if wanted_level > 0:
+			# NPCs run from player when wanted > 0
+			n["speed"] = lerpf(n["speed"], 2.0, min(1.0, delta * 3.0))  # Speed up significantly
+			# NPCs try to avoid player by moving away from player position
+			if player_pos.distance_to(n["mesh"].position) > 0.0:
+				var away_dir: Vector3 = (n["mesh"].position - player_pos).normalized()
+				n["dir"] = -1  # Move opposite direction
+				
+			# NPCs can also try to hide in nearby buildings
+				if n.get("hide_cooldown", 0.0) <= 0.0 and not n.get("hiding", false):
+					var nearby_building: bool = false
+					var building_grid: Vector2i = Vector2i(-1, -1)
+					# Check if there's a building near the NPC
+					for b in placed_buildings:
+						var bpos: Vector3 = Vector3(_wx(b.x * CELL), 0, _wz(b.y * CELL))
+						if bpos.distance_to(n["mesh"].position) < 3.0:
+							nearby_building = true
+							building_grid = Vector2i(b.x, b.y)
+							break
+					if nearby_building and building_grid != Vector2i(-1, -1):
+						# NPC enters building to hide
+						_enter_building_for_hide(building_grid.x, building_grid.y, n)
+						n["hide_cooldown"] = 30.0  # Can't hide again for 30 seconds
+			else:
+				n["hide_cooldown"] = maxf(0.0, n["hide_cooldown"] - delta)
+		else:
+			# Normal NPC behavior when not wanted
+			n["speed"] = lerpf(0.3, 1.0, 1.0 if is_day else 0.2)
+			
+			# GTA behavior: NPCs try to escape if wanted just dropped
+			if n.get("escape_path") and not n.get("reached_escape_target", false):
+				# Move along escape path
+				var current_pos := n["escape_path"][0]
+				var next_pos := n["escape_path"][1]
+				
+				var dist := current_pos.distance_to(next_pos)
+				if dist > 0.0:
+					var move_dir := (next_pos - current_pos).normalized()
+					n["mesh"].position += move_dir * n["speed"] * 2.0 * delta  # Faster than normal movement
+					n["mesh"].rotation.y = atan2(move_dir.x, move_dir.z)
+					
+				# Remove reached points from path
+					if n["mesh"].position.distance_to(next_pos) < 0.5:
+						n["escape_path"].remove_at(0)
+						if n["escape_path"].size() < 2:
+							n["reached_escape_target"] = true
+				
+			# If escape path completed, wait a bit before trying again
+				if n.get("reached_escape_target", false):
+					if n.get("escape_wait_timer", 0.0) <= 0.0:
+						n["escape_wait_timer"] = rng.randf_range(5.0, 15.0)  # Wait 5-15 seconds
+						n["escape_path"] = []  # Clear path for next attempt
+						n["reached_escape_target"] = false
+				else:
+						n["escape_wait_timer"] -= delta
+		
+		# Check if NPC has left the building (exiting hide)
+			if n.get("hiding", false) and not n.get("interior_root"):
+				# NPC is no longer hiding, can start normal behavior again
+				n["hiding"] = false
+				n["escape_wait_timer"] = 0.0
+		
+		# Normal movement logic (only if not actively hiding)
+			if not n.get("hiding", false):
+				var t: float = n["t"]
+				var day_mult: float = 1.0 if (_t > 0.3 and _t < 0.75) else 0.35
+				t += delta * n["speed"] * n["dir"] * day_mult / (n["path"][1] - n["path"][0]).length()
+				if t > 1.0:
+					t = 1.0
+					n["dir"] = -1
+				elif t < 0.0:
+					t = 0.0
+					n["dir"] = 1
+				n["t"] = t
+				var pos: Vector3 = n["path"][0].lerp(n["path"][1], t)
+				pos.y = 0.7
+				n["mesh"].position = pos
+				# Face direction
+				var fwd: Vector3 = (n["path"][1] - n["path"][0]).normalized() * n["dir"]
+				if fwd.length() > 0.01:
+					n["mesh"].rotation.y = atan2(fwd.x, fwd.z)
+					n["dialogue_cooldown"] = maxf(0.0, n.get("dialogue_cooldown", 0.0) - delta)
 
+		# Each NPC gets a personality-driven dialogue line and a possible side quest.
+	# Dialogue is seeded by the NPC index so it's stable across saves.
+	func _npc_dialogue(idx: int) -> Dictionary:
+	var lines: Array[String] = [
+	"Nice day for a stroll!",
+	"Watch where you're going, pal.",
+	"The rent's due Friday.",
+	"Ever think about moving uptown?",
+	"I saw a cop car idling near 5th.",
+	"Tony's pizza is still the best in town.",
+	"Did you hear? The bank got hit last week.",
+	"Stay off the south side after dark.",
+	"The mayor's building a new park downtown.",
+	"Gas is up again. Ridiculous.",
+	"I heard the docks are hiring.",
+	"Watch your wallet in the market.",
+	]
+	var idx2: int = idx % lines.size()
+	var greetings: Array[String] = [
+	"Hey there!", "Psst, you!", "Well, hello!", "How's it going?",
+	"Need directions?", "You look lost.", "Watch it!", "Good day to you.",
+	]
+	var g_idx: int = (idx * 3 + 7) % greetings.size()
+	return {
+	"greeting": greetings[g_idx],
+	"line": lines[idx2],
+	}
+
+	# Side quests: each NPC can offer a small job. Quests are one-shot per NPC
+	# (cleared on accept) so the player can't farm them infinitely.
+	func _npc_quest(idx: int) -> Dictionary:
+	var quest_pool: Array[Dictionary] = [
+	{"type": "collect", "target": "money", "count": 3, "reward": 150, "desc": "Bring me 3 money bags from the streets."},
+	{"type": "collect", "target": "ammo", "count": 5, "reward": 200, "desc": "Find 5 ammo crates, they're scattered around."},
+	{"type": "escort", "target": "shop", "reward": 300, "desc": "Walk me to the shop on 3rd. I'm not going alone."},
+	{"type": "deliver", "target": "package", "reward": 250, "desc": "Take this package to the office on 7th. Don't drop it."},
+	{"type": "kill", "target": "thug", "count": 2, "reward": 500, "desc": "There are some thugs hanging near the docks. Make them disappear."},
+	{"type": "survive", "target": "wanted", "reward": 400, "desc": "Lose the cops for 30 seconds and I'll pay you."},
+	]
+	var q: Dictionary = quest_pool[idx % quest_pool.size()].duplicate()
+	q["offered"] = false
+	q["accepted"] = false
+	q["completed"] = false
+	return q
+
+	func _try_dialogue() -> void:
+	if interior_view or vehicle_in:
+	return
+	var nearest_idx: int = -1
+	var nearest_d: float = 9999.0
+	for i in range(npcs.size()):
+	var n: Dictionary = npcs[i]
+	var d: float = player_pos.distance_to(n["mesh"].position)
+	if d < 2.5 and d < nearest_d:
+		nearest_d = d
+		nearest_idx = i
+	if nearest_idx < 0:
+	_announce("Nobody nearby to talk to.", Color(0.7, 0.7, 0.7))
+	return
+	var n: Dictionary = npcs[nearest_idx]
+	if n.get("dialogue_cooldown", 0.0) > 0.0:
+	return
+	n["dialogue_cooldown"] = 3.0
+	# Show the greeting + line as an announcement
+	var greet: String = n["dialogue"].get("greeting", "Hey")
+	var line: String = n["dialogue"].get("line", "")
+	_announce("%s: \"%s\"" % [greet, line], Color(0.8, 0.9, 1.0))
+	# Offer the side quest if available
+		var q: Dictionary = n.get("quest", {})
+		if not q.get("offered", false) and not q.get("accepted", false):
+			# Build the quest through the side_quests system so it tracks progress
+			var sq: Dictionary = side_quests.offer_quest(nearest_idx)
+			n["quest"] = sq
+			_announce("SIDE QUEST available: %s (Press M to accept)" % sq.get("desc", ""), Color(1.0, 0.85, 0.3))
+			sq["offered"] = true
+			n["quest"] = sq
+		elif q.get("offered", false) and not q.get("accepted", false) and not side_quests.has_active_quest():
+			_announce("SIDE QUEST still available: %s (Press M to accept)" % q.get("desc", ""), Color(1.0, 0.85, 0.3))
+
+func _update_dialogue(delta: float) -> void:
+	# Decrement dialogue cooldowns so NPCs can be talked to again after a few seconds
+	for n in npcs:
+		if n.get("dialogue_cooldown", 0.0) > 0.0:
+			n["dialogue_cooldown"] = maxf(0.0, n["dialogue_cooldown"] - delta)
 
 func _try_enter_building() -> void:
 	if interior_view:
-		return
+	return
 	# Find nearest building cell within 4m
 	var nearest: Vector2i = Vector2i(-1, -1)
 	var best_d: float = 9999.0
@@ -1808,82 +2073,6 @@ func _try_enter_building() -> void:
 	_enter_building(nearest.x, nearest.y)
 
 
-func _enter_building(x: int, z: int) -> void:
-	_play_enter_building_sound()
-	# Check if this is the bank
-	if Vector3(_wx(x * CELL), 0, _wz(z * CELL)).distance_to(bank_pos) < 1.0 and wanted_level < 3:
-		# Walk in clean and you can start the heist
-		_announce("BANK - just browsing. The heist comes later in the mission chain.", Color(0.6, 0.9, 0.6))
-	interior_view = true
-	interior_root = Node3D.new()
-	add_child(interior_root)
-	# Floor (small dark plane)
-	var floor := _make_box(Vector3(2.5, 0.05, 2.5),
-		Vector3(0, 0, 0),
-		Color(0.30, 0.25, 0.20))
-	floor.position = Vector3(_wx(x * CELL), 0.1, _wz(z * CELL))
-	interior_root.add_child(floor)
-	# Walls
-	var wall_mat_color: Color = Color(0.70, 0.65, 0.55)
-	interior_root.add_child(_make_box(Vector3(2.5, 2.5, 0.1),
-		Vector3(_wx(x * CELL) - 1.2, 1.25, _wz(z * CELL)),
-		wall_mat_color))
-	interior_root.add_child(_make_box(Vector3(2.5, 2.5, 0.1),
-		Vector3(_wx(x * CELL) + 1.2, 1.25, _wz(z * CELL)),
-		wall_mat_color))
-	interior_root.add_child(_make_box(Vector3(0.1, 2.5, 2.5),
-		Vector3(_wx(x * CELL), 1.25, _wz(z * CELL) - 1.2),
-		wall_mat_color))
-	# Roof
-	interior_root.add_child(_make_box(Vector3(2.5, 0.1, 2.5),
-		Vector3(_wx(x * CELL), 2.6, _wz(z * CELL)),
-		Color(0.40, 0.35, 0.30)))
-	# Richer props based on building type (use color_idx)
-	var color_idx: int = _bk(x, z).length()  # hash by string for some variety
-	var interior_type: int = (x * 7 + z * 13) % 4  # 0=home, 1=shop, 2=office, 3=vault
-	if interior_type == 0:
-		# Apartment: bed, table, couch
-		interior_root.add_child(_make_box(Vector3(1.0, 0.3, 0.6), Vector3(_wx(x * CELL) - 0.6, 0.25, _wz(z * CELL) - 0.6), Color(0.7, 0.4, 0.4)))  # bed
-		interior_root.add_child(_make_box(Vector3(0.4, 0.5, 0.4), Vector3(_wx(x * CELL) + 0.5, 0.3, _wz(z * CELL) - 0.6), Color(0.5, 0.35, 0.2)))  # table
-		interior_root.add_child(_make_box(Vector3(0.8, 0.4, 0.4), Vector3(_wx(x * CELL), 0.25, _wz(z * CELL) + 0.5), Color(0.6, 0.5, 0.4)))  # couch
-	elif interior_type == 1:
-		# Shop: counter, shelves
-		interior_root.add_child(_make_box(Vector3(1.4, 0.7, 0.3), Vector3(_wx(x * CELL), 0.4, _wz(z * CELL) - 0.85), Color(0.6, 0.5, 0.3)))  # counter
-		for sx in [-0.7, 0.0, 0.7]:
-			interior_root.add_child(_make_box(Vector3(0.2, 0.4, 0.5), Vector3(_wx(x * CELL) + sx - 0.3, 0.3, _wz(z * CELL) + 0.6), Color(0.7, 0.6, 0.4)))  # shelf
-	elif interior_type == 2:
-		# Office: desk, chair, computer
-		interior_root.add_child(_make_box(Vector3(0.8, 0.5, 0.4), Vector3(_wx(x * CELL) - 0.4, 0.3, _wz(z * CELL) - 0.6), Color(0.5, 0.35, 0.25)))  # desk
-		interior_root.add_child(_make_box(Vector3(0.3, 0.6, 0.3), Vector3(_wx(x * CELL) - 0.4, 0.35, _wz(z * CELL) - 0.2), Color(0.3, 0.3, 0.4)))  # chair
-		interior_root.add_child(_make_box(Vector3(0.4, 0.3, 0.05), Vector3(_wx(x * CELL) - 0.4, 0.65, _wz(z * CELL) - 0.85), Color(0.1, 0.1, 0.15)))  # monitor
-	else:
-		# Vault: safe, money pile, gold bars
-		interior_root.add_child(_make_box(Vector3(0.8, 1.0, 0.8), Vector3(_wx(x * CELL) - 0.5, 0.55, _wz(z * CELL) - 0.5), Color(0.3, 0.3, 0.4)))  # safe
-		for gx in range(3):
-			for gz in range(3):
-				interior_root.add_child(_make_box(Vector3(0.1, 0.05, 0.1), Vector3(_wx(x * CELL) + 0.3 + gx * 0.15, 0.08, _wz(z * CELL) + 0.3 + gz * 0.15), Color(0.9, 0.75, 0.3)))  # gold
-	# Sign on the back wall
-	var sign_color: Color = Color(0.9, 0.8, 0.4)
-	var sign_text: String = "HOME"
-	if interior_type == 1:
-		sign_text = "SHOP"
-	elif interior_type == 2:
-		sign_text = "OFFICE"
-	elif interior_type == 3:
-		sign_text = "VAULT"
-	# (Label3D would be best; skip for now, the boxes are distinctive enough)
-	# Hide the exterior, show only interior + dim lighting
-	# Easiest: set all OTHER nodes' visible = false, but we tracked them via interior_root separation
-	# Move player to interior center
-	player_pos = Vector3(_wx(x * CELL), 0.7, _wz(z * CELL) + 0.5)
-	player.position = player_pos
-	# Switch to interior camera
-	cam_thirdperson = true
-	cam_player_dist = 2.0
-	cam_player_pitch = -10.0
-	_refresh_player_camera()
-
-
 func _exit_building() -> void:
 	if not interior_view:
 		return
@@ -1893,6 +2082,53 @@ func _exit_building() -> void:
 		interior_root = null
 	cam_player_dist = 12.0
 	cam_player_pitch = -25.0
+	
+	# Check if any NPCs were hiding in this building and allow them to move
+	for n in npcs:
+		if n.get("hiding", false) and n.get("interior_root"):
+			# Allow NPC to start moving again
+			n["hiding"] = false
+			n["path"] = [n["path"][0], n["path"][1]]  # Restore normal path
+			n["t"] = 0.0
+			n["dir"] = 1
+			# Clean up the interior root
+			n["interior_root"].queue_free()
+			n["interior_root"] = null
+			# Let the NPC know they can move again
+			n["hide_cooldown"] = 0.0
+		_announce("NPC left hiding place", Color(0.2, 0.8, 0.2))
+
+
+func _enter_building_for_hide(x: int, z: int, npc_data: Dictionary) -> void:
+	# Make an NPC enter a building to hide from police
+	# This is a simplified version that just teleports the NPC to the building's interior
+	# In a real implementation, you'd want to create a proper NPC interior mesh
+	
+	var interior_root: Node3D = Node3D.new()
+	add_child(interior_root)
+	
+	# Create a simple box for the NPC to hide in
+	var hide_box := _make_box(Vector3(0.8, 1.0, 0.8), Vector3(0, 0.5, 0), Color(0.3, 0.3, 0.4), true)  # Emissive to indicate hiding
+	interior_root.add_child(hide_box)
+	
+	# Store the hiding state in the NPC data
+	npc_data["hiding"] = true
+	npc_data["interior_root"] = interior_root
+	
+	# Announce that an NPC is hiding
+	_announce("NPC hiding in building at grid " + str(x) + "," + str(z), Color(0.3, 0.3, 0.8))
+	
+	# Move the NPC into the building
+	npc_data["mesh"].position = Vector3(_wx(x * CELL), 1.0, _wz(z * CELL))
+	npc_data["path"] = [npc_data["mesh"].position, npc_data["mesh"].position]  # Static path while hiding
+	npc_data["t"] = 0.0
+	npc_data["dir"] = 1
+	
+	# Set up path finding for escaping
+	var start_pos := npc_data["mesh"].position
+	var end_pos := Vector3(_wx((x + rng.randi_range(1, 7)) * CELL), 1.0, _wz((z + rng.randi_range(1, 7)) * CELL))
+	
+	npc_data["escape_path"] = _find_path_3d(start_pos, end_pos)
 
 
 func _try_enter_vehicle() -> void:
@@ -2405,6 +2641,13 @@ func _build_health_banner() -> void:
 	health_warning_label.visible = false
 	hcl.add_child(health_warning_label)
 
+## Initialize BGM
+bgm_player = AudioStreamPlayer3D.new()
+bgm_player.position = Vector3(0, 0, 0)
+bgm_player.volume_db = linear_to_db(bgm_volume * bgm_weather_mod)
+add_child(bgm_player)
+_init_bgm_streams()
+_refresh_bgm()
 
 func _refresh_buy_menu() -> void:
 	if buy_menu_cl == null:
@@ -2723,12 +2966,71 @@ func _update_mission(delta: float) -> void:
 	if current_mission.get("id") == "pizza_delivery":
 		_update_delivery_mission(delta)
 		return
+	# Side quests: track progress on the active NPC-offered quest
+	_update_side_quest(delta)
 	# Heist and money-bag missions have their own completion logic
 	if not current_mission.has("target_pos"):
 		return
 	var d: float = player_pos.distance_to(current_mission["target_pos"])
 	if d < current_mission["target_radius"]:
 		_complete_mission()
+
+# Side quests: track progress on the active NPC-offered quest.
+# Called every frame from _update_mission so collect/kill/survive types
+# update in real time.  Escort/deliver types need a target set by the
+# NPC; the player walks to it and presses M to complete.
+func _update_side_quest(delta: float) -> void:
+	if side_quests == null or not side_quests.has_active_quest():
+		return
+	var sq: Dictionary = side_quests.get_active_quest()
+	# Decrement the quest timer
+	sq["timer"] -= delta
+	if sq["timer"] <= 0.0:
+		_announce("SIDE QUEST FAILED: %s" % sq.get("desc", ""), Color(1.0, 0.5, 0.3))
+		side_quests._fail_quest()
+		return
+	# Progress checks by quest type
+	match sq.get("type", ""):
+		"collect":
+			# Player collects pickups of the target type
+			for p in pickups:
+				if p.get("type", "") == sq["target"] and not p.get("sq_collected", false):
+					p["sq_collected"] = true
+					sq["progress"] += 1
+					_announce("QUEST: %d/%d %s collected" % [sq["progress"], sq["count"], sq["target"]], Color(0.7, 1.0, 0.7))
+					if sq["progress"] >= sq["count"]:
+						_announce("QUEST COMPLETE: %s  +$%d" % [sq.get("desc", ""), sq["reward"]], Color(0.4, 1.0, 0.4))
+						side_quests.complete_quest()
+						return
+		"kill":
+			# Player kills NPCs (tracked by stats_npcs_killed)
+			var needed: int = sq.get("_baseline_kills", 0) + sq["count"]
+			if stats_npcs_killed >= needed:
+				_announce("QUEST COMPLETE: %s  +$%d" % [sq.get("desc", ""), sq["reward"]], Color(0.4, 1.0, 0.4))
+				side_quests.complete_quest()
+		"survive":
+			# Player must have wanted_level == 0 for the duration
+			# The timer counts down; if wanted > 0, reset timer
+			if wanted_level > 0:
+				sq["timer"] = sq["time_limit"]
+				_announce("QUEST: Lose the cops first!", Color(1.0, 0.6, 0.3))
+		"escort", "deliver":
+			# These need a target position; the NPC sets it when the quest is accepted.
+			# The player walks to it and presses M to complete.
+			if sq.has("target_pos"):
+				var d2: float = player_pos.distance_to(sq["target_pos"])
+				if d2 < sq.get("target_radius", 3.0):
+					_announce("QUEST COMPLETE: %s  +$%d" % [sq.get("desc", ""), sq["reward"]], Color(0.4, 1.0, 0.4))
+					side_quests.complete_quest()
+
+# Called by side_quests.gd when a quest completes or fails.
+func _on_side_quest_complete(reward: int, quest_id: String) -> void:
+	sim_budget += reward
+	stats_money_earned += reward
+	_announce("QUEST REWARDED: +$%d" % reward, Color(0.5, 0.9, 0.5))
+
+func _on_side_quest_failed(quest_id: String) -> void:
+	_announce("QUEST FAILED: %s" % quest_id, Color(1.0, 0.4, 0.4))
 
 
 func _complete_mission() -> void:
@@ -2792,8 +3094,16 @@ func _next_mission_2() -> void:
 
 # Pressed M: advance to the next mission.  Handles both forward-progress
 # (active -> complete -> next) and the "all done" end state.
+# Also: if a side quest is offered but not yet accepted, M accepts it.
 func _advance_mission() -> void:
-	# M while a mission is running skips it (no reward) so nobody gets stuck.
+	# M accepts an offered side quest (NPC dialogue offered it, player pressed M)
+	if side_quests != null and side_quests.has_active_quest():
+		# Already have an active side quest — nothing to accept
+		pass
+	elif _has_offered_side_quest():
+		_accept_offered_side_quest()
+		return
+	# M while a story mission is running skips it (no reward) so nobody gets stuck.
 	if not current_mission.is_empty() and current_mission.get("status") == "active":
 		_announce("MISSION SKIPPED: " + str(current_mission.get("name", "?")), Color(0.7, 0.7, 0.7))
 		_fail_current_mission()
@@ -2804,6 +3114,48 @@ func _advance_mission() -> void:
 	# Story finished: pizza runs stay available for replay value.
 	_next_mission_3()
 
+# Check if any NPC has an offered-but-unaccepted side quest
+func _has_offered_side_quest() -> bool:
+	for n in npcs:
+		var q: Dictionary = n.get("quest", {})
+		if q.get("offered", false) and not q.get("accepted", false):
+			return true
+	return false
+
+# Accept the first offered side quest from the nearest NPC
+func _accept_offered_side_quest() -> void:
+	var nearest_idx: int = -1
+	var nearest_d: float = 9999.0
+	for i in range(npcs.size()):
+		var n: Dictionary = npcs[i]
+		var q: Dictionary = n.get("quest", {})
+		if q.get("offered", false) and not q.get("accepted", false):
+			var d: float = player_pos.distance_to(n["mesh"].position)
+			if d < 2.5 and d < nearest_d:
+				nearest_d = d
+				nearest_idx = i
+	if nearest_idx < 0:
+		return
+	var n: Dictionary = npcs[nearest_idx]
+	var q: Dictionary = n.get("quest", {})
+	# Build the quest through the side_quests system
+	var sq: Dictionary = side_quests.offer_quest(nearest_idx)
+	sq["accepted"] = true
+	sq["status"] = "active"
+	sq["npc_index"] = nearest_idx
+	# Set baseline kills for kill-type quests
+	if sq.get("type", "") == "kill":
+		sq["_baseline_kills"] = stats_npcs_killed
+	# For escort/deliver, set a target position near the NPC
+	if sq.get("type", "") in ["escort", "deliver"]:
+		var target_grid: Vector2i = _nearest_shop_or_office(n["mesh"].position)
+		sq["target_pos"] = Vector3(_wx(target_grid.x * CELL), 0.0, _wz(target_grid.y * CELL))
+		sq["target_radius"] = 3.0
+		# Build a visual marker at the target
+		_build_quest_marker(sq["target_pos"], sq.get("target", "shop"))
+	n["quest"] = sq
+	_announce("QUEST ACCEPTED: %s (Press M to skip)" % sq.get("desc", ""), Color(1.0, 0.85, 0.3))
+
 
 func _start_mission(id: String) -> void:
 	match id:
@@ -2813,6 +3165,47 @@ func _start_mission(id: String) -> void:
 		"the_big_heist": _start_heist()
 		"pizza_delivery": _next_mission_3()
 	_announce("NEW MISSION: " + str(current_mission.get("name", "?")), Color(0.95, 0.85, 0.30))
+
+# Find the nearest shop/office building to a given world position.
+# Used by escort/deliver side quests to set a walkable target.
+func _nearest_shop_or_office(world_pos: Vector3) -> Vector2i:
+	var best: Vector2i = Vector2i(4, 4)
+	var best_d: float = 9999.0
+	for b in placed_buildings:
+		# Commercial (1) or civic buildings are shops/offices
+		if b.z == 1:
+			var bpos: Vector3 = Vector3(_wx(b.x * CELL), 0, _wz(b.y * CELL))
+			var d: float = world_pos.distance_to(bpos)
+			if d < best_d:
+				best_d = d
+				best = Vector2i(b.x, b.y)
+	if best_d > 9990:
+		# Fallback: nearest road cell
+		var cx: int = int(round((world_pos.x + HALF) / CELL))
+		var cz: int = int(round((world_pos.z + HALF) / CELL))
+		cx = clampi(int(round(float(cx) / ROAD_EVERY)) * ROAD_EVERY, 0, GRID - ROAD_EVERY)
+		cz = clampi(int(round(float(cz) / ROAD_EVERY)) * ROAD_EVERY, 0, GRID - ROAD_EVERY)
+		return Vector2i(cx, cz)
+	return best
+
+# Build a visual marker (glowing cylinder) at a quest target position.
+func _build_quest_marker(pos: Vector3, label: String) -> void:
+	var marker := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.height = 2.0
+	cyl.top_radius = 0.15
+	cyl.bottom_radius = 0.15
+	marker.mesh = cyl
+	var mat := StandardMaterial3D.new()
+	var mat_albedo := Color(1.0, 0.85, 0.2)
+ mat.albedo_color = mat_albedo
+ mat.emission_enabled = true
+ mat.emission = Color(0.8, 0.6, 0.1)
+ mat.emission_energy_multiplier = 1.5
+	marker.material_override = mat
+	marker.position = pos + Vector3(0, 1.0, 0)
+	marker.name = "quest_marker"
+	add_child(marker)
 
 
 # Mission 5: "Pizza Run".  Build a pizza shop, a yellow box on the counter,
