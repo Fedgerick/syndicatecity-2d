@@ -111,6 +111,7 @@ var last_shot_time: float = 0.0
 var total_deaths: int = 0  # times player was busted/killed
 var total_respawns: int = 0
 var player_invulnerable: float = 0.0  # seconds of i-frames after respawn
+var hp_regen_active: bool = false  # true while HP is passively regenerating
 var announcement_label: Label  # big yellow banner for unlocks, mission start, etc.
 var announcement_timer: float = 0.0
 var audio_on: bool = true
@@ -173,6 +174,7 @@ var dialogue_npc_index: int = -1
 var dialogue_overlay: CanvasLayer
 var dialogue_label: Label
 var side_quests: Node  # side_quests.gd — NPC-offered side quests
+var settings: Node  # settings.gd — volume, keybinds, resolution
 
 
 func _ready() -> void:
@@ -1672,7 +1674,7 @@ func _update_context_hint() -> void:
 
 func _refresh_hud() -> void:
 	if hud_label:
-		var hp_str: String = "HP:%d" % player_health
+		var hp_str: String = "HP:%d%s" % [player_health, "+" if hp_regen_active else ""]
 		var bsign: String = "-" if sim_budget < 0 else ""
 		hud_label.text = "SYNDICATE CITY   %s   Day %d   $%s%s   Pop %d   TAX %d%%   placed=%d" % [
 			hp_str,
@@ -2495,9 +2497,21 @@ func _update_player_status(delta: float) -> void:
 		if player:
 			var v: float = abs(sin(Time.get_ticks_msec() * 0.02))
 			player.visible = v > 0.4
+		# No regen while invulnerable
+		if hp_regen_active:
+			hp_regen_active = false
 	else:
 		if player:
 			player.visible = true
+	# Passive HP regen: +5/sec when health > 50 and wanted = 0 (spec §4).
+	# Pauses during invulnerability, while wanted, and when already at full HP.
+	if player_invulnerable <= 0.0 and wanted_level == 0 and player_health > 50 and player_health < player_max_health:
+		if not hp_regen_active:
+			hp_regen_active = true
+		player_health = min(player_max_health, player_health + int(5.0 * delta))
+	else:
+		if hp_regen_active:
+			hp_regen_active = false
 	# Clamp health, kill if zero
 	if player_health <= 0 and not game_over:
 		_on_player_death()
