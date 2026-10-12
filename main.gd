@@ -128,6 +128,10 @@ var damage_flash: float = 0.0
 var damage_flash_cl: CanvasLayer  # 0=easy, 1=normal, 2=hard
 var easy_mode: bool = false
 
+# Fire system: buildings can burn, spread, and be resolved
+var burning_buildings: Dictionary = {}  # key "x,z" -> time_remaining (seconds)
+var fire_spread_chance: float = 0.3     # per adjacent neighbor per day
+var fire_extinguish_rate: float = 0.1   # per day when player is near
 ## Background ambient music system
 var bgm_player: AudioStreamPlayer3D
 var bgm_volume: float = 0.5
@@ -416,6 +420,7 @@ func _sim_daily_tick() -> void:
 	_update_city_health(r_count, c_count, i_count)
 	_update_power_coverage()
 	_update_water_coverage()
+	_update_fire()
 
 
 func _update_city_health(r_count: int, c_count: int, i_count: int) -> void:
@@ -872,12 +877,110 @@ func _update_water_coverage() -> void:
 				break
 		watered_cells[key] = watered
 
+func _update_fire() -> void:
+	# Fire system: buildings can burn, spread, and be resolved
+	# Decay burning buildings
+	var keys := burning_buildings.keys_to_array()
+	for key in keys:
+		if not burning_buildings.has(key):
+			continue
+		var remaining: float = burning_buildings[key] - 0.5  # per day decay
+		if remaining <= 0.0:
+			# Building fully burned — remove it
+			var parts := key.split(",")
+			var x: int = int(parts[0])
+			var z: int = int(parts[1])
+			burning_buildings.erase(key)
+			# Remove from placed_buildings
+			for i in range(placed_buildings.size()):
+				var b := placed_buildings[i]
+				if b.x == x and b.y == z:
+					placed_buildings.remove_at(i)
+					break
+			continue
+		burning_buildings[key] = remaining
+		# Check spread to adjacent buildings
+		var x: int = int(key.split(",")[0])
+		var z: int = int(key.split(",")[1])
+		for dx in [-1, 0, 1]:
+			for dz in [-1, 0, 1]:
+				if dx == 0 and dz == 0:
+					continue
+				var nx: int = x + dx
+				var nz: int = z + dz
+				if nx >= 0 and nx < GRID and nz >= 0 and nz < GRID:
+					var nkey := "%d,%d" % [nx, nz]
+					if not burning_buildings.has(nkey) and cell_density.has(nkey):
+						var n_density := cell_density[nkey]
+						# Industrial burns fastest, residential moderate, commercial slowest
+						var base_chance := fire_spread_chance
+						if n_density >= 2:  # industrial
+							base_chance = 0.5
+						elif n_density == 1:  # commercial
+							base_chance = 0.15
+						else:  # density 0 means grass/empty
+							continue
+						if randf() < base_chance:
+							burning_buildings[nkey] = 3.0  # 3 days to burn
+							_announce("FIRE SPREAD to cell (%d,%d)" % [nx, nz], Color(1.0, 0.3, 0.1))
+
+	# Check for player putting out fires (when near)
+	var player_near_fire: bool = false
+	for key in burning_buildings.keys():
+		var parts := key.split(",")
+		var fx: int = int(parts[0])
+		var fz: int = int(parts[1])
+		var dist := player_pos.distance_to(Vector3(_wx(fx * CELL), 0.7, _wz(fz * CELL)))
+		if dist < 8.0:
+			player_near_fire = true
+			var remaining := burning_buildings[key] - fire_extinguish_rate
+			if remaining <= 0.0:
+				burning_buildings.erase(key)
+				_announce("FIRE OUT at cell (%d,%d)" % [fx, fz], Color(0.4, 0.8, 0.4))
+			else:
+				burning_buildings[key] = remaining
+
+	# Check total burning buildings count for the health warning
+	var total_burned := burning_buildings.size()
+	if total_burned >= 15:
+		if sim_active_health_warning != "fire":
+			_show_health_banner("FIRE: %d buildings burning! Zone industrial away from residential." % total_burned, Color(1.0, 0.3, 0.1), 6.0)
+			sim_active_health_warning = "fire"
+	elif total_burned < 3 and sim_active_health_warning == "fire":
+		sim_active_health_warning = ""
+
+func _clear_burning_buildings() -> void:
+	burning_buildings.clear()
+	sim_active_health_warning = ""
+
+func _build_burned_building_visual(x: int, z: int) -> void:
+	var key := "%d,%d" % [x, z]
+	for i in range(building_meshes.size()):
+		var mesh := building_meshes[i]
+		var meta_key := "%d,%d" % [mesh.get_meta("x", 0), mesh.get_meta("z", 0)]
+		if meta_key == key:
+			mesh.queue_free()
+			building_meshes.remove_at(i)
+			break
+	var sq := _make_box(Vector3(CELL * 0.8, 0.5, CELL * 0.8), Vector3(_wx(x * CELL), 0.25, _wz(z * CELL)), Color(0.0, 0.0, 0.0), true)
+	sq.name = "burned_building_%d_%d" % [x, z]
+	add_child(sq)
+
+func _reseed_building(x: int, z: int) -> void:
+	var color_idx := randi() % 3
+	var density := randi_range(1, 3)
+	_place_building(x, z, color_idx, density)
+
 func _update_water_tiles() -> void:
 	water_tiles.clear()
 	for x in GRID:
 		for z in GRID:
 			if _is_water(x, z):
 				water_tiles.append(Vector2i(x, z))
+
+func _bk(x: int, z: int) -> String:
+	return "%d,%d" % [x, z]
+
 
 
 func _bk(x: int, z: int) -> String:
