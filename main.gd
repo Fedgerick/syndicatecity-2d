@@ -2110,6 +2110,7 @@ func _try_enter_building() -> void:
 		return
 	# Find nearest building cell within 4m
 	var nearest: Vector2i = Vector2i(-1, -1)
+	var nearest_color_idx: int = -1
 	var best_d: float = 9999.0
 	for b in placed_buildings:
 		var bpos: Vector3 = Vector3(_wx(b.x * CELL), 0, _wz(b.y * CELL))
@@ -2117,7 +2118,12 @@ func _try_enter_building() -> void:
 		if d < best_d:
 			best_d = d
 			nearest = Vector2i(b.x, b.y)
+			nearest_color_idx = b.z
 	if best_d > 3.5:
+		return
+	# Commercial shops only open during day
+	if nearest_color_idx == 1 and not (_t > 0.3 and _t < 0.75):
+		_announce("Shop is closed", Color(0.5, 0.5, 0.5))
 		return
 	_enter_building(nearest.x, nearest.y)
 
