@@ -143,6 +143,16 @@ var current_vehicle_pos: Vector3
 var current_vehicle_yaw: float = 0.0
 var current_vehicle_speed: float = 0.0
 var vehicles: Array = []  # list of {mesh, pos, yaw, speed, color}
+# ---- Helicopter (v8 spec) ----
+# Helipad at grid (22,22) near the bank. Flyable helicopter with WASD
+# horizontal + Space/Shift altitude. Enter with F like a car.
+var helicopter: Dictionary = {}
+var helicopter_in: bool = false
+const HELI_MAX_SPEED := 16.0
+const HELI_ACCEL := 6.0
+const HELI_MIN_ALT := 5.0
+const HELI_MAX_ALT := 25.0
+const HELI_ALT_RATE := 3.0
 var interior_view: bool = false
 var interior_root: Node3D
 var player: MeshInstance3D
@@ -213,7 +223,8 @@ func _ready() -> void:
 	_build_traffic()
 	_build_cars()
 	_build_parked_cars()
-	_build_pickups()
+		_build_helicopter()
+		_build_pickups()
 	_build_npcs()
 	_build_cone_pool()
 	_build_trees()
@@ -233,11 +244,13 @@ func _ready() -> void:
 	_build_main_menu()
 	_build_buy_menu()
 	# Side-quest system: NPCs offer quests on dialogue, player accepts with M
-	side_quests = load("res://side_quests.gd").new()
-	add_child(side_quests)
-	if _auto_start:
-		print("AUTOSTART: dismissing menu")
-		_dismiss_menu()
+	tside_quests = load("res://side_quests.gd").new()
+		add_child(side_quests)
+		settings = load("res://settings.gd").new()
+		add_child(settings)
+		if _auto_start:
+			print("AUTOSTART: dismissing menu")
+			_dismiss_menu()
 	bullet_template = CylinderMesh.new()
 	bullet_template.top_radius = 0.06
 	bullet_template.bottom_radius = 0.06
@@ -635,7 +648,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_0: current_tool = "select"
 			KEY_SPACE: _try_shoot()
 			KEY_F:
-				if vehicle_in:
+				if helicopter_in:
+					_exit_helicopter()
+				elif vehicle_in:
 					_exit_vehicle()
 				else:
 					_try_enter_vehicle()
@@ -643,9 +658,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				if interior_view:
 					_exit_building()
 				else:
-					_try_enter_building()
+							_try_enter_building()
 			KEY_ESCAPE:
-				if interior_view:
+				if helicopter_in:
+					_exit_helicopter()
+				elif interior_view:
 					_exit_building()
 				else:
 					_set_paused(true)
@@ -682,7 +699,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				cam_thirdperson = false
 				_refresh_camera()
 			KEY_N: _cycle_weather()
-			KEY_M: _advance_mission()
+						KEY_O: settings.toggle()
+						KEY_M: _advance_mission()
 		_refresh_controls()
 
 
@@ -1543,7 +1561,7 @@ func _build_hud() -> void:
 	help.position = Vector2(920, 90)
 	help.add_theme_font_size_override("font_size", 14)
 	help.add_theme_color_override("font_color", Color(0.95, 0.94, 0.88))
-	help.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car\nE = Enter building\nSpace = Shoot\nB = Store  TAB = Stats\nG = Raise wanted\nJ = Take damage\nP / Esc = Pause\nC/V = Cam toggle\nH = Hide help\nF5/F9 = Save/Load\n+/- = Speed\n[/] = Tax rate (0-20%)\nT = Top-down\nN = Cycle weather\nM = Next mission"
+	thelp.text = "1=Res  2=Com  3=Ind\n4=Road  5=Bulldoze\n6=Coal  7=Wind\n0 = Select\nClick to apply tool\nWASD = Move\nF = Enter/Exit car/heli\nE = Enter building\nSpace = Shoot\nB = Store  TAB = Stats\nG = Raise wanted\nJ = Take damage\nP / Esc = Pause\nC/V = Cam toggle\nH = Hide help\nO = Settings\nF5/F9 = Save/Load\n+/- = Speed\n[/] = Tax rate (0-20%)\nT = Top-down\nN = Cycle weather\nM = Next mission"
 	controls_overlay.add_child(help)
 	# Wanted meter overlay (top-left)
 	var wanted_cl := CanvasLayer.new()
@@ -1647,8 +1665,10 @@ func _update_context_hint() -> void:
 		hint = "[MISSION] " + current_mission.get("name", current_mission.get("title", "?")) + ": " + current_mission.get("objective", "")
 	if interior_view:
 		hint += "  | Press ESC to leave building"
-	if vehicle_in:
-		hint += "  | Driving. F to exit."
+	if helicopter_in:
+		thint += "  | HELICOPTER. Space: up Shift: down. F to exit."
+	elif vehicle_in:
+		thint += "  | Driving. F to exit."
 	if wanted_level >= 3:
 		hint += "  | WANTED " + str(wanted_level) + " STARS - run!"
 	if not event_active.is_empty():
@@ -2087,7 +2107,7 @@ func _update_dialogue(delta: float) -> void:
 
 func _try_enter_building() -> void:
 	if interior_view:
-	return
+		return
 	# Find nearest building cell within 4m
 	var nearest: Vector2i = Vector2i(-1, -1)
 	var best_d: float = 9999.0
@@ -2101,6 +2121,91 @@ func _try_enter_building() -> void:
 		return
 	_enter_building(nearest.x, nearest.y)
 
+func _enter_building(x: int, z: int) -> void:
+	if interior_view:
+		return
+	interior_view = true
+	# Create interior root
+	interior_root = Node3D.new()
+	interior_root.name = "InteriorRoot"
+	add_child(interior_root)
+	# Position interior at building center
+	var center: Vector3 = Vector3(_wx(x * CELL), 0, _wz(z * CELL))
+	interior_root.position = center
+	# Determine building type and create appropriate interior
+	var color_idx: int = -1
+	for b in placed_buildings:
+		if b.x == x and b.y == z:
+			color_idx = b.z
+			break
+	# Create simple interior based on building type
+	if color_idx == 0:
+		# Residential - small room with bed
+		var room := _make_box(Vector3(4.0, 3.0, 3.0), Vector3(0, 1.5, 0), Color(0.95, 0.90, 0.80))
+		interior_root.add_child(room)
+		var bed := _make_box(Vector3(2.0, 0.5, 1.5), Vector3(-1.5, 0.5, 0), Color(0.60, 0.40, 0.20))
+		interior_root.add_child(bed)
+		# Door visual
+		var door := _make_box(Vector3(0.1, 2.0, 1.5), Vector3(2.0, 0.5, 0), Color(0.30, 0.20, 0.15))
+		interior_root.add_child(door)
+		# Label
+		var lbl := Label.new()
+		lbl.text = "Residential Interior\n[ESC] Exit"
+		lbl.add_theme_font_size_override("font_size", 16)
+		lbl.add_theme_color_override("font_color", Color(0.2, 0.6, 0.2))
+		lbl.position = Vector2(0, -50)
+		interior_root.add_child(lbl)
+	elif color_idx == 1:
+		# Commercial - shop with counter
+		var shop := _make_box(Vector3(5.0, 3.0, 4.0), Vector3(0, 1.5, 0), Color(0.85, 0.70, 0.40))
+		interior_root.add_child(shop)
+		# Counter
+		var counter := _make_box(Vector3(0.2, 1.0, 3.0), Vector3(2.0, 0.5, 0), Color(0.50, 0.35, 0.25))
+		interior_root.add_child(counter)
+		# Display case
+		var display := _make_box(Vector3(2.0, 1.5, 2.0), Vector3(-1.5, 0.5, 0), Color(0.95, 0.95, 0.90), true)
+		interior_root.add_child(display)
+		# Label
+		var lbl := Label.new()
+		lbl.text = "Commercial Shop\n[ESC] Exit"
+		lbl.add_theme_font_size_override("font_size", 16)
+		lbl.add_theme_color_override("font_color", Color(0.2, 0.5, 0.8))
+		lbl.position = Vector2(0, -50)
+		interior_root.add_child(lbl)
+	elif color_idx == 2:
+		# Industrial - large room with machines
+		var room := _make_box(Vector3(6.0, 3.0, 5.0), Vector3(0, 1.5, 0), Color(0.70, 0.60, 0.60))
+		interior_root.add_child(room)
+		# Machines
+		for i in range(3):
+			var machine := _make_box(Vector3(1.5, 0.8, 2.0), Vector3(-3 + i * 2.5, 0.5, 0), Color(0.4, 0.4, 0.45))
+			interior_root.add_child(machine)
+		# Label
+		var lbl := Label.new()
+		lbl.text = "Industrial Factory\n[ESC] Exit"
+		lbl.add_theme_font_size_override("font_size", 16)
+		lbl.add_theme_color_override("font_color", Color(0.8, 0.4, 0.2))
+		lbl.position = Vector2(0, -50)
+		interior_root.add_child(lbl)
+	else:
+		# Default generic room
+		var room := _make_box(Vector3(3.0, 2.5, 3.0), Vector3(0, 1.25, 0), Color(0.90, 0.85, 0.75))
+		interior_root.add_child(room)
+		var lbl := Label.new()
+		lbl.text = "Generic Room\n[ESC] Exit"
+		lbl.add_theme_font_size_override("font_size", 16)
+		lbl.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+		lbl.position = Vector2(0, -50)
+		interior_root.add_child(lbl)
+	# Switch to interior camera mode
+	cam_thirdperson = false
+	cam_topdown = false
+	_refresh_camera()
+	# Announce
+	_announce("Entered building at grid %d,%d" % [x, z], Color(0.4, 0.8, 0.4))
+	# Play sound
+	_play_enter_building_sound()
+
 
 func _exit_building() -> void:
 	if not interior_view:
@@ -2111,6 +2216,12 @@ func _exit_building() -> void:
 		interior_root = null
 	cam_player_dist = 12.0
 	cam_player_pitch = -25.0
+	cam_topdown = false
+	_refresh_camera()
+	_announce("Exited building", Color(0.8, 0.6, 0.4))
+	# Restore normal gameplay
+	cam_thirdperson = true
+	_refresh_player_camera()
 	
 	# Check if any NPCs were hiding in this building and allow them to move
 	for n in npcs:
@@ -2161,8 +2272,14 @@ func _enter_building_for_hide(x: int, z: int, npc_data: Dictionary) -> void:
 
 
 func _try_enter_vehicle() -> void:
-	if vehicle_in:
+	if vehicle_in or helicopter_in:
 		return
+	# Check helicopter first (it's a separate vehicle type)
+	if not helicopter.is_empty() and not helicopter_in:
+		var hd: float = player_pos.distance_to(helicopter.get("pos", Vector3.ZERO))
+		if hd < 4.0:
+			_enter_helicopter()
+			return
 	# Find nearest car within 3m
 	var best: Dictionary = {}
 	var best_d: float = 9999.0
@@ -2184,6 +2301,37 @@ func _try_enter_vehicle() -> void:
 	cam_player_dist = 7.0
 	cam_player_pitch = -15.0
 
+func _enter_helicopter() -> void:
+	helicopter_in = true
+	current_vehicle = helicopter["mesh"]
+	current_vehicle_pos = helicopter["pos"]
+	current_vehicle_yaw = helicopter.get("yaw", 0.0)
+	current_vehicle_speed = 0.0
+	# Hide player mesh
+	player.visible = false
+	# Helicopter camera: higher up, looking down
+	cam_player_dist = 10.0
+	cam_player_pitch = -35.0
+	_announce("ENTERED HELICOPTER - Space: up  Shift: down", Color(0.4, 0.7, 1.0))
+
+func _exit_helicopter() -> void:
+	if not helicopter_in:
+		return
+	helicopter_in = false
+	# Save helicopter state
+	helicopter["yaw"] = current_vehicle_yaw
+	helicopter["speed"] = current_vehicle_speed
+	helicopter["altitude"] = current_vehicle_pos.y
+	# Place player on the helipad
+	var exit_offset := Vector3(3.0, 0.0, 0.0).rotated(Vector3.UP, current_vehicle_yaw)
+	player_pos = current_vehicle_pos + exit_offset
+	player_pos.y = 0.7
+	player.position = player_pos
+	player.visible = true
+	current_vehicle = null
+	cam_player_dist = 12.0
+	cam_player_pitch = -25.0
+	_announce("Exited helicopter", Color(0.8, 0.6, 0.4))
 
 func _exit_vehicle() -> void:
 	if not vehicle_in:
@@ -2235,6 +2383,9 @@ func _check_vehicle_hits() -> void:
 			_add_wanted(1)
 
 func _update_vehicle(delta: float) -> void:
+	if helicopter_in:
+		_update_helicopter(delta)
+		return
 	if not vehicle_in or current_vehicle == null:
 		return
 	# Acceleration / brake
@@ -2273,9 +2424,61 @@ func _update_vehicle(delta: float) -> void:
 	if abs(current_vehicle_speed) > 1.0:
 		_check_vehicle_hits()
 
+func _update_helicopter(delta: float) -> void:
+	if not helicopter_in or current_vehicle == null:
+		return
+	# Horizontal movement (WASD) — same as car but faster
+	var accel: float = 0.0
+	if Input.is_action_pressed("ui_up"):
+		accel = HELI_ACCEL
+	elif Input.is_action_pressed("ui_down"):
+		accel = -HELI_ACCEL * 0.6
+	else:
+		current_vehicle_speed *= max(0.0, 1.0 - delta * 3.0)
+	current_vehicle_speed += accel * delta
+	current_vehicle_speed = clamp(current_vehicle_speed, -HELI_MAX_SPEED * 0.5, HELI_MAX_SPEED)
+	# Steering
+	var steer: float = 0.0
+	if Input.is_action_pressed("ui_left"):
+		steer = -1.0
+	elif Input.is_action_pressed("ui_right"):
+		steer = 1.0
+	if abs(current_vehicle_speed) > 0.1:
+		current_vehicle_yaw += steer * (2.0 * delta) * sign(current_vehicle_speed)
+	# Altitude: Space = up, Shift = down
+	var alt_delta: float = 0.0
+	if Input.is_action_pressed("ui_accept"):  # Space
+		alt_delta = HELI_ALT_RATE
+	elif Input.is_action_pressed("ui_shift"):  # Shift
+		alt_delta = -HELI_ALT_RATE
+	var new_alt: float = clamp(current_vehicle_pos.y + alt_delta * delta, HELI_MIN_ALT, HELI_MAX_ALT)
+	# Move
+	var fwd := Vector3(sin(current_vehicle_yaw), 0.0, cos(current_vehicle_yaw))
+	var new_pos: Vector3 = current_vehicle_pos + fwd * current_vehicle_speed * delta
+	new_pos.y = new_alt
+	# World bounds
+	var bound: float = HALF - CELL * 0.5
+	new_pos.x = clamp(new_pos.x, -bound, bound)
+	new_pos.z = clamp(new_pos.z, -bound, bound)
+	current_vehicle_pos = new_pos
+	current_vehicle.position = new_pos
+	current_vehicle.rotation.y = current_vehicle_yaw
+	# Move player too
+	player_pos = new_pos
+	player.position = new_pos
+	# Update searchlight to point down
+	if helicopter.has("light") and is_instance_valid(helicopter["light"]):
+		helicopter["light"].position = new_pos + Vector3(0, -0.4, -2.0)
+	# Animate rotor blades (spin them)
+	if helicopter.has("mesh"):
+		var now: float = Time.get_ticks_msec() / 1000.0
+		for child in helicopter["mesh"].get_children():
+			if child is MeshInstance3D:
+				child.rotation.y = now * 8.0
+
 
 func _is_player_in_vehicle() -> bool:
-	return vehicle_in
+	return vehicle_in or helicopter_in
 
 
 func _build_police() -> void:
@@ -3460,6 +3663,121 @@ func _build_parked_cars() -> void:
 
 
 
+func _build_helicopter() -> void:
+	# Helicopter on a helipad at grid (22,22) near the bank. Flyable with
+	# WASD + Space/Shift altitude. Enter with F like a car.
+	var heli_pos := Vector3(_wx(22 * CELL), HELI_MIN_ALT, _wz(22 * CELL))
+	# Helipad marker: flat black disc
+	var pad := MeshInstance3D.new()
+	var pad_mesh := CylinderMesh.new()
+	pad_mesh.top_radius = 0.0
+	pad_mesh.bottom_radius = 2.5
+	pad_mesh.height = 0.15
+	pad.mesh = pad_mesh
+	var pad_mat := StandardMaterial3D.new()
+	pad_mat.albedo_color = Color(0.15, 0.15, 0.18)
+	pad.material_override = pad_mat
+	pad.position = heli_pos + Vector3(0, -0.07, 0)
+	add_child(pad)
+	# Helicopter body: main fuselage
+	var heli := MeshInstance3D.new()
+	var body := BoxMesh.new()
+	body.size = Vector3(2.2, 0.9, 4.0)
+	heli.mesh = body
+	var hmat := StandardMaterial3D.new()
+	hmat.albedo_color = Color(0.10, 0.10, 0.35)  # dark navy
+	hmat.roughness = 0.5
+	heli.material_override = hmat
+	heli.position = heli_pos
+	add_child(heli)
+	# Rotor mast + blades (emissive so they glow at night)
+	var mast := MeshInstance3D.new()
+	var mast_mesh := CylinderMesh.new()
+	mast_mesh.top_radius = 0.0
+	mast_mesh.bottom_radius = 0.12
+	mast_mesh.height = 1.6
+	mast.mesh = mast_mesh
+	var mast_mat := StandardMaterial3D.new()
+	mast_mat.albedo_color = Color(0.3, 0.3, 0.35)
+	mast.material_override = mast_mat
+	mast.position = heli_pos + Vector3(0, 0.9, 0)
+	add_child(mast)
+	# Two rotor blades (long thin boxes, cross pattern)
+	for blade_idx in 2:
+		var blade := MeshInstance3D.new()
+		var bmesh := BoxMesh.new()
+		bmesh.size = Vector3(0.25, 0.08, 5.5)
+		blade.mesh = bmesh
+		var bmat := StandardMaterial3D.new()
+		bmat.albedo_color = Color(0.2, 0.2, 0.25)
+		bmat.emission_enabled = true
+		bmat.emission = Color(0.3, 0.3, 0.4)
+		bmat.emission_energy_multiplier = 0.5
+		blade.material_override = bmat
+		blade.position = heli_pos + Vector3(0, 1.7, 0)
+		blade.rotation.y = blade_idx * PI / 2.0
+		add_child(blade)
+	# Cockpit glass (bright blue)
+	var cockpit := MeshInstance3D.new()
+	var cmesh := BoxMesh.new()
+	cmesh.size = Vector3(1.6, 0.6, 1.2)
+	cockpit.mesh = cmesh
+	var cmat := StandardMaterial3D.new()
+	cmat.albedo_color = Color(0.3, 0.5, 0.8)
+	cmat.emission_enabled = true
+	cmat.emission = Color(0.15, 0.25, 0.5)
+	cmat.emission_energy_multiplier = 0.4
+	cockpit.material_override = cmat
+	cockpit.position = heli_pos + Vector3(0, 0.5, -1.2)
+	add_child(cockpit)
+	# Tail boom
+	var tail := MeshInstance3D.new()
+	var tmesh := BoxMesh.new()
+	tmesh.size = Vector3(0.5, 0.5, 2.5)
+	tail.mesh = tmesh
+	var tmat := StandardMaterial3D.new()
+	tmat.albedo_color = Color(0.08, 0.08, 0.30)
+	tail.material_override = tmat
+	tail.position = heli_pos + Vector3(0, 0.5, 2.2)
+	add_child(tail)
+	# Tail rotor (thin box rotated to vertical)
+	var trotor := MeshInstance3D.new()
+	var trbox := BoxMesh.new()
+	trbox.size = Vector3(0.08, 0.08, 1.8)
+	trotor.mesh = trbox
+	var trmat := StandardMaterial3D.new()
+	trmat.albedo_color = Color(0.2, 0.2, 0.25)
+	trotor.material_override = trmat
+	trotor.position = heli_pos + Vector3(0, 0.9, 3.4)
+	trotor.rotation.x = PI / 2.0
+	add_child(trotor)
+	# Searchlight under the nose (emissive white)
+	var light := MeshInstance3D.new()
+	var lmesh := CylinderMesh.new()
+	lmesh.top_radius = 0.0
+	lmesh.bottom_radius = 0.35
+	lmesh.height = 0.3
+	light.mesh = lmesh
+	var lmat := StandardMaterial3D.new()
+	lmat.albedo_color = Color(1.0, 0.98, 0.9)
+	lmat.emission_enabled = true
+	lmat.emission = Color(0.8, 0.8, 0.8)
+	lmat.emission_energy_multiplier = 2.0
+	light.material_override = lmat
+	light.position = heli_pos + Vector3(0, 0.3, -2.2)
+	light.rotation.x = PI
+	add_child(light)
+	# Store helicopter state
+	helicopter = {
+		"mesh": heli,
+		"pos": heli_pos,
+		"yaw": 0.0,
+		"speed": 0.0,
+		"altitude": HELI_MIN_ALT,
+		"light": light,
+		"cockpit": cockpit,
+	}
+
 func _build_pickups() -> void:
 	# Scatter money bags and health kits
 	var rng := RandomNumberGenerator.new()
@@ -3927,7 +4245,7 @@ func _build_main_menu() -> void:
 	inst.text = """Build your city. Walk its roads. Commit crimes. Make the cash.
 
 1/2/3 zones  4 roads  5 bulldoze  6/7 power  Click to apply
-WASD / arrows walk or drive   F enter/exit car   Space shoot   E enter building
+WASD / arrows walk or drive   F enter/exit car/heli   Space shoot   E enter building
 +/- sim speed  T top-down  C/V camera  N weather  [ ] tax
 M next mission  H hide help  TAB stats  B store  P pause  F5/F9 save/load
 
